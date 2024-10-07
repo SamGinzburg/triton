@@ -307,7 +307,7 @@ public:
       auto eltType = dotOp.getA().getType().getElementType();
       // In MMAV3 tranpose is only supported for f16 and bf16.
       bool allowTranspose = eltType.isF16() || eltType.isBF16();
-      a = getSharedMemoryMMAOperand(a, rewriter, 0, allowTranspose);
+      //a = getSharedMemoryMMAOperand(a, rewriter, 0, allowTranspose);
       b = getSharedMemoryMMAOperand(b, rewriter, 1, allowTranspose);
       newDot = rewriter.create<triton::nvidia_gpu::WarpGroupDotOp>(
           dotOp.getLoc(), newRetType, a, b, newAcc, nullptr,
@@ -318,12 +318,14 @@ public:
           std::min(computeOrigBitWidth(a), computeOrigBitWidth(b));
       Type minType = rewriter.getIntegerType(minBitwidth);
       // convert A operand
+
       auto newAEncoding = DotOperandEncodingAttr::get(
           oldAType.getContext(), 0, newRetType.getEncoding(),
           minBitwidth > 0 ? minType : oldAType.getElementType());
       auto newAType = RankedTensorType::get(
           oldAType.getShape(), oldAType.getElementType(), newAEncoding);
       a = rewriter.create<ConvertLayoutOp>(a.getLoc(), newAType, a);
+
       // convert B operand
       auto newBEncoding = DotOperandEncodingAttr::get(
           oldBType.getContext(), 1, newRetType.getEncoding(),
@@ -331,6 +333,7 @@ public:
       auto newBType = RankedTensorType::get(
           oldBType.getShape(), oldBType.getElementType(), newBEncoding);
       b = rewriter.create<ConvertLayoutOp>(b.getLoc(), newBType, b);
+
       newDot = rewriter.create<DotOp>(dotOp.getLoc(), newRetType, a, b, newAcc,
                                       dotOp.getInputPrecision(),
                                       dotOp.getMaxNumImpreciseAcc());

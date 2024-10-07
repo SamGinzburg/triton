@@ -618,7 +618,7 @@ bool isMfmaToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy) {
          dotOperandLayout.getKWidth() == getContigPerThread(mfmaLayout)[1] &&
          dotOperandLayout.getParent() == mfmaLayout &&
          (mfmaLayout.getMDim() == 32 || mfmaLayout.getMDim() == 16) &&
-         (srcTy.getElementType().isF16() || srcTy.getElementType().isBF16());
+         (srcTy.getElementType().isF16() || srcTy.getElementType().isBF16() || srcTy.getElementType().isF32());
 }
 
 // For MMAV3 dotOperand layout matches mma operand for f16 and bf16 cases.
@@ -636,7 +636,7 @@ bool matchMmaV3AndDotOperandLayout(RankedTensorType srcTy,
              dotOperandLayout.getOpIdx() == 0 &&
              mmaLayout.getWarpsPerCTA()[1] == 1 &&
              !cvtNeedsSharedMemory(parentTy, srcTy) &&
-             (elementTypeSize == 16 || elementTypeSize == 8);
+             (elementTypeSize == 32 || elementTypeSize == 16 || elementTypeSize == 8);
   return ans;
 }
 
@@ -721,8 +721,8 @@ bool isMmaToDotShortcut(RankedTensorType srcTy, RankedTensorType dstTy) {
   return mmaLayout && dotOperandLayout && mmaLayout.getVersionMajor() == 2 &&
          mmaLayout.getWarpsPerCTA()[1] == 1 &&
          dotOperandLayout.getOpIdx() == 0 &&
-         dotOperandLayout.getParent() == mmaLayout &&
-         !srcTy.getElementType().isF32();
+         dotOperandLayout.getParent() == mmaLayout;
+        // !srcTy.getElementType().isF32();
 }
 
 namespace {

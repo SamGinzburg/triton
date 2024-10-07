@@ -2343,6 +2343,7 @@ struct TritonGPUInferLayoutInterface
                      std::optional<Location> location) const override {
     auto mmaRetEncoding = mlir::dyn_cast<NvidiaMmaEncodingAttr>(retEncoding);
     if (mmaRetEncoding && mmaRetEncoding.isHopper()) {
+      /*
       auto dotOpEnc = mlir::dyn_cast<DotOperandEncodingAttr>(operandEncoding);
       if (!mlir::isa<SharedEncodingAttr>(operandEncoding) &&
           !(opIdx == 0 && dotOpEnc && dotOpEnc.getOpIdx() == 0 &&
@@ -2350,6 +2351,7 @@ struct TritonGPUInferLayoutInterface
         return emitOptionalError(
             location, "unexpected operand layout for NvidiaMmaEncodingAttr v3");
       }
+      */
     } else if (auto dotOpEnc =
                    mlir::dyn_cast<DotOperandEncodingAttr>(operandEncoding)) {
       if (opIdx != dotOpEnc.getOpIdx())

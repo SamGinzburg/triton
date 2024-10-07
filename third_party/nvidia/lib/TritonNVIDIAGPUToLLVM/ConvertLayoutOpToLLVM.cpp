@@ -622,7 +622,7 @@ private:
     auto srcTy = op.getSrc().getType();
     auto dstTy = op.getType();
     if (matchMmaV3AndDotOperandLayout(srcTy, dstTy)) {
-      if (srcTy.getElementType().getIntOrFloatBitWidth() == 16) {
+      if (srcTy.getElementType().getIntOrFloatBitWidth() == 16 || srcTy.getElementType().getIntOrFloatBitWidth() == 32) {
         rewriter.replaceOp(op, adaptor.getSrc());
         return success();
       }
