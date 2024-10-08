@@ -90,6 +90,9 @@ void decomposeBlockedToDotLayoutConversion(ModuleOp module) {
     auto dstDotOp =
         dyn_cast<triton::gpu::DotOperandEncodingAttr>(dstType.getEncoding());
     if (srcBlocked && dstDotOp) {
+
+
+      /*
       Attribute sharedMemorySpace =
           triton::gpu::SharedMemorySpaceAttr::get(srcType.getContext());
       auto tmpType = MemDescType::get(
@@ -107,6 +110,9 @@ void decomposeBlockedToDotLayoutConversion(ModuleOp module) {
       addAttrs(newConvert, cvtOp->getAttrs());
       cvtOp.replaceAllUsesWith(newConvert.getResult());
       cvtOp.erase();
+      */
+
+
     }
   });
 }

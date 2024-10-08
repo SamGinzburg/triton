@@ -1054,6 +1054,7 @@ SmallVector<unsigned> DotOperandEncodingAttr::getShapePerCTATile(
     return parentMmaLayout.getShapePerCTATileForDotOperands(tensorShape,
                                                             getOpIdx());
   } else {
+    llvm::errs() << parentLayout << "\n";
     llvm::report_fatal_error(
         "DotOperandEncodingAttr non-NvidiaMmaEncodingAttr parent not "
         "supported yet");
@@ -2114,7 +2115,7 @@ unsigned NvidiaMmaEncodingAttr::getTotalElemsPerThreadForOperands(
 SmallVector<unsigned>
 NvidiaMmaEncodingAttr::getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape,
                                                         int opIdx) const {
-  assert(isAmpere() && "mmaLayout version = 1 is not implemented yet");
+  //assert(isAmpere() && "mmaLayout version = 1 is not implemented yet");
   auto parentShapePerCTATile = getShapePerCTATile(shape);
   auto rank = parentShapePerCTATile.size();
   if (opIdx == 0) {
@@ -2133,7 +2134,7 @@ NvidiaMmaEncodingAttr::getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape,
 }
 SmallVector<unsigned>
 NvidiaMmaEncodingAttr::getSizePerThreadForOperands(unsigned opIdx) const {
-  assert(isAmpere() && "mmaLayout version = 1 is not implemented yet");
+  //assert(isAmpere() && "mmaLayout version = 1 is not implemented yet");
   if (opIdx == 0) {
     return {2, 4};
   } else if (opIdx == 1) {
@@ -2321,7 +2322,6 @@ struct TritonGPUInferLayoutInterface
                      std::optional<Location> location) const override {
     auto mmaRetEncoding = mlir::dyn_cast<NvidiaMmaEncodingAttr>(retEncoding);
     if (mmaRetEncoding && mmaRetEncoding.isHopper()) {
-      /*
       auto dotOpEnc = mlir::dyn_cast<DotOperandEncodingAttr>(operandEncoding);
       if (!mlir::isa<SharedEncodingAttr>(operandEncoding) &&
           !(opIdx == 0 && dotOpEnc && dotOpEnc.getOpIdx() == 0 &&
@@ -2329,7 +2329,6 @@ struct TritonGPUInferLayoutInterface
         return emitOptionalError(
             location, "unexpected operand layout for NvidiaMmaEncodingAttr v3");
       }
-      */
     } else if (auto dotOpEnc =
                    mlir::dyn_cast<DotOperandEncodingAttr>(operandEncoding)) {
       if (opIdx != dotOpEnc.getOpIdx())
