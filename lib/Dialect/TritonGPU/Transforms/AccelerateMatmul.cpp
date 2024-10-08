@@ -307,11 +307,18 @@ public:
       auto eltType = dotOp.getA().getType().getElementType();
       // In MMAV3 tranpose is only supported for f16 and bf16.
       bool allowTranspose = eltType.isF16() || eltType.isBF16();
-      //a = getSharedMemoryMMAOperand(a, rewriter, 0, allowTranspose);
-      b = getSharedMemoryMMAOperand(b, rewriter, 1, allowTranspose);
+      a = getSharedMemoryMMAOperand(a, rewriter, 1, allowTranspose);
+      //b = getSharedMemoryMMAOperand(b, rewriter, 1, allowTranspose);
+      // swap a, b
       newDot = rewriter.create<triton::nvidia_gpu::WarpGroupDotOp>(
-          dotOp.getLoc(), newRetType, a, b, newAcc, nullptr,
+          dotOp.getLoc(), newRetType, b, a, newAcc, nullptr,
           dotOp.getInputPrecision(), dotOp.getMaxNumImpreciseAcc(), false);
+      /*
+      newDot = rewriter.create<triton::nvidia_gpu::WarpGroupDotOp>(
+      dotOp.getLoc(), newRetType, a, b, newAcc, nullptr,
+      dotOp.getInputPrecision(), dotOp.getMaxNumImpreciseAcc(), false);
+      */
+
     } else {
       // convert operands
       int minBitwidth =

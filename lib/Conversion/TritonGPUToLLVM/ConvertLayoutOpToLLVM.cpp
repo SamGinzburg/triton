@@ -13,6 +13,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
+#include <iostream>
 
 namespace {
 
@@ -46,8 +47,16 @@ public:
     Attribute srcLayout = srcTy.getEncoding();
     Attribute dstLayout = dstTy.getEncoding();
     if (isSupported(srcLayout, dstLayout)) {
+      std::cout << "ConvertLayoutOpConversion::matchAndRewrite: " << op << "\n";
       return lowerDistributedToDistributed(op, adaptor, rewriter, targetInfo);
     }
+
+    llvm::errs() << "Invalid layout attribute:\n" << srcLayout << "\n" << dstLayout << "\n" <<
+    std::to_string(isa<BlockedEncodingAttr, MmaEncodingTrait, SliceEncodingAttr>(srcLayout))
+    << "\n" <<
+    std::to_string(isa<BlockedEncodingAttr, MmaEncodingTrait, SliceEncodingAttr>(dstLayout)) << "\n" <<
+    std::to_string(!isLayoutMmaV1(srcLayout) && !isLayoutMmaV1(dstLayout)) << "\n";
+
     return failure();
   }
 

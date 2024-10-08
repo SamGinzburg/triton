@@ -1056,6 +1056,7 @@ SmallVector<unsigned> DotOperandEncodingAttr::getShapePerCTATile(
     return parentMmaLayout.getShapePerCTATileForOperand(
         tensorShape, getKWidth(), getOpIdx());
   } else {
+    llvm::errs() << parentLayout << "\n";
     llvm::report_fatal_error(
         "DotOperandEncodingAttr non-NvidiaMmaEncodingAttr parent not "
         "supported yet");
@@ -2118,9 +2119,10 @@ unsigned NvidiaMmaEncodingAttr::getTotalElemsPerThreadForOperand(
   }
   llvm_unreachable("unknown mma layout");
 }
+<<<<<<< HEAD
 SmallVector<unsigned> NvidiaMmaEncodingAttr::getShapePerCTATileForOperand(
     ArrayRef<int64_t> shape, int kWidth, int opIdx) const {
-  assert(isAmpere() && "mmaLayout version = 1 is not implemented yet");
+  //assert(isAmpere() && "mmaLayout version = 1 is not implemented yet");
   auto parentShapePerCTATile = getShapePerCTATile(shape);
   auto rank = parentShapePerCTATile.size();
   // 4 threads * 2 subtiles
@@ -2143,7 +2145,7 @@ SmallVector<unsigned> NvidiaMmaEncodingAttr::getShapePerCTATileForOperand(
 }
 SmallVector<unsigned>
 NvidiaMmaEncodingAttr::getSizePerThreadForOperand(int kWidth, int opIdx) const {
-  assert(isAmpere() && "mmaLayout version = 1 is not implemented yet");
+  //assert(isAmpere() && "mmaLayout version = 1 is not implemented yet");
   auto rank = getWarpsPerCTA().size();
   auto sizePerThread = SmallVector<unsigned>(rank, 1);
   if (opIdx == 0) {
@@ -2343,7 +2345,6 @@ struct TritonGPUInferLayoutInterface
                      std::optional<Location> location) const override {
     auto mmaRetEncoding = mlir::dyn_cast<NvidiaMmaEncodingAttr>(retEncoding);
     if (mmaRetEncoding && mmaRetEncoding.isHopper()) {
-      /*
       auto dotOpEnc = mlir::dyn_cast<DotOperandEncodingAttr>(operandEncoding);
       if (!mlir::isa<SharedEncodingAttr>(operandEncoding) &&
           !(opIdx == 0 && dotOpEnc && dotOpEnc.getOpIdx() == 0 &&
@@ -2351,7 +2352,6 @@ struct TritonGPUInferLayoutInterface
         return emitOptionalError(
             location, "unexpected operand layout for NvidiaMmaEncodingAttr v3");
       }
-      */
     } else if (auto dotOpEnc =
                    mlir::dyn_cast<DotOperandEncodingAttr>(operandEncoding)) {
       if (opIdx != dotOpEnc.getOpIdx())

@@ -49,8 +49,8 @@ mlir::LogicalResult WarpGroupDotOp::inferReturnTypes(
     assert(bEnc);
     Dialect &dialect = aEnc.getDialect();
     auto interface = dyn_cast<DialectInferLayoutInterface>(&dialect);
-    if (interface->inferDotOpEncoding(aEnc, 0, retEnc, location).failed())
-      return mlir::failure();
+    //if (interface->inferDotOpEncoding(aEnc, 0, retEnc, location).failed())
+    //  return mlir::failure();
     if (interface->inferDotOpEncoding(bEnc, 1, retEnc, location).failed())
       return mlir::failure();
   }
