@@ -57,6 +57,7 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
                             tt::CoarseSchedule::Cluster prefetchCluster,
                             llvm::MapVector<Operation *, LoadInfo> &loadToInfo,
                             int numStages) {
+  LDBG("createAsyncCopy: " << *loadOp);
   OpBuilder builder(forOp);
   Value zero = builder.create<arith::ConstantIntOp>(forOp.getLoc(), 0, 32);
   // Replace the load with insert/extract slice.
@@ -65,18 +66,21 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
   Value src = loadOp.getPtr();
   Value mask = loadOp.getMask();
   Value other = loadOp.getOther();
+
+  ttg::BlockedEncodingAttr encoding = loadToInfo[loadOp].blockedEncoding;
+  auto convertBlockLayout = [&](Value src) {
+    auto ty = cast<RankedTensorType>(src.getType());
+    auto newTy =
+        RankedTensorType::get(ty.getShape(), ty.getElementType(), encoding);
+    auto cvt =
+        builder.create<ttg::ConvertLayoutOp>(loadOp->getLoc(), newTy, src);
+    return cvt.getResult();
+  };
+
   if (!isExpensiveLoadOrStore(loadOp) && loadToInfo[loadOp].blockedEncoding) {
     // For inexpensive loads that do not directly feed into dot ops
     // we want to use optimal layout for the data.
-    ttg::BlockedEncodingAttr encoding = loadToInfo[loadOp].blockedEncoding;
-    auto convertBlockLayout = [&](Value src) {
-      auto ty = cast<RankedTensorType>(src.getType());
-      auto newTy =
-          RankedTensorType::get(ty.getShape(), ty.getElementType(), encoding);
-      auto cvt =
-          builder.create<ttg::ConvertLayoutOp>(loadOp->getLoc(), newTy, src);
-      return cvt.getResult();
-    };
+
     src = convertBlockLayout(src);
     if (mask)
       mask = convertBlockLayout(mask);
@@ -84,14 +88,39 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
       other = convertBlockLayout(other);
   }
 
+  // Check if oldOrder == newOrder
+  //  if (!loadOp->hasOneUse()) TODO ERR
+  //  return false;
+
+  // this can't fail if we are pipelining already
+  SmallVector<unsigned> oldOrder;
+  llvm::ArrayRef<unsigned int> newOrder;
+  ttg::LocalAllocOp localAlloc = nullptr;
+  if (auto lAlloc = dyn_cast<ttg::LocalAllocOp>((*loadOp->getUsers().begin()))) {
+    auto sharedEnc = dyn_cast<ttg::SharedEncodingAttr>(lAlloc.getType().getEncoding());
+    newOrder = sharedEnc.getOrder();
+    auto ty = cast<RankedTensorType>(loadOp->getResultTypes()[0]);
+    oldOrder = ttg::getOrder(ty.getEncoding());
+    localAlloc = lAlloc;
+  }
+
   tt::MemDescType allocTy = cast<tt::MemDescType>(alloc.getType());
+  tt::MemDescType allocTyNew;
+  if (loadToInfo[loadOp].usedByDot && oldOrder != newOrder && localAlloc) {
+    allocTyNew = cast<tt::MemDescType>(localAlloc.getType());
+  } else {
+    allocTyNew = allocTy;
+  }
+
   SmallVector<Value> copyOffsets(allocTy.getRank(), zero);
   copyOffsets[0] = insertIdx;
   Attribute sharedMemorySpace =
       triton::gpu::SharedMemorySpaceAttr::get(forOp.getContext());
+
   tt::MemDescType subviewTy = tt::MemDescType::get(
       allocTy.getShape().drop_front(), allocTy.getElementType(),
-      allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
+      allocTyNew.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
+
   auto view =
       builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, copyOffsets);
   Operation *copy = builder.create<ttg::AsyncCopyGlobalToLocalOp>(
@@ -107,6 +136,7 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
   schedule.erase(loadOp);
   schedule.insert(copy, stage, cluster);
   schedule.insert(commmit, stage, cluster);
+  LDBG("createAsyncCopy: commit" << *commmit);
 
   // Extract part.
   SmallVector<Value> loadOffsets(allocTy.getRank(), zero);
@@ -114,9 +144,45 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
   auto viewLoad =
       builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
   if (isMMV3Load) {
+    LDBG("createAsyncCopy: isMMV3Load");
     auto alloc = cast<ttg::LocalAllocOp>((*loadOp->getUsers().begin()));
-    replaceUsesAndPropagateType(builder, alloc, viewLoad.getResult());
-    alloc.erase();
+
+
+    // If this is a 32-bit load and it is used by a dot-op
+    // we need to transpose the B-operand via layout conversion
+
+    if (loadToInfo[loadOp].usedByDot && oldOrder != newOrder) {
+
+      LDBG("Load " << *loadOp << "oldOrder != newOrder");
+
+      /*
+      // Load to #blocked
+      auto localLoad = builder.create<ttg::LocalLoadOp>(
+          loc, loadOp.getType(), viewLoad.getResult(), wait->getResult(0));
+      //schedule.insert(localLoad, stage, cluster);
+
+      //auto localLoadResult = localLoad.getResult();
+
+      // Convert to the new order
+      auto newOrderTy = RankedTensorType::get(
+          ty.getShape(), ty.getElementType(), localAlloc.getType().getEncoding());
+      auto orderConv = builder.create<triton::gpu::ConvertLayoutOp>(
+            loc, newOrderTy, localLoad);
+      //schedule.insert(orderConv, stage, cluster);
+      //auto newOrderResult = orderConv.getResult();
+
+      auto sharedLoad = builder.create<ttg::LocalLoadOp>(
+        loc, loadOp.getType(), orderConv.getResult());
+      auto result = sharedLoad->getResults();
+      */
+      //alloc->replaceAllUsesWith(orderConv.getResult());
+
+      mlir::triton::replaceUsesAndPropagateType(builder, alloc, viewLoad.getResult());
+      alloc.erase();
+    } else {
+      replaceUsesAndPropagateType(builder, alloc, viewLoad.getResult());
+      alloc.erase();
+    }
   } else {
     SmallVector<ttg::LocalAllocOp> allocsToErase;
     for (Operation *user : loadOp->getUsers()) {
@@ -389,7 +455,9 @@ static bool loadIsMMAv3(Operation *loadOp) {
   // be changed after FuseTranspositions Pass. So we only pipeline the
   // load if the order of the loaded BlockedEncoding is the same as the
   // order of the SharedEncoding it is converted to.
-  return oldOrder == newOrder;
+  LDBG("order equivalence: " << (oldOrder == newOrder) << "ty: " << ty.getElementType().isF32());
+  // If the type is F32, then its fine to pipeline the load---we can't do a HW transpose anyways
+  return oldOrder == newOrder || ty.getElementType().isF32();
 }
 
 static llvm::MapVector<Operation *, LoadInfo>
@@ -451,6 +519,7 @@ assignMemoryLayouts(llvm::SmallVector<std::tuple<Operation *, int, Operation *>>
       // assumption is held by how loadOpsToIndirectionLevelAndUse recursively
       // collects loadOpToIndLevelAndUse using DFS.
       if (loadToInfo.count(loadOp) == 0) {
+        LDBG("Load is used by another loadop");
         continue;
       }
     }
@@ -468,6 +537,7 @@ assignMemoryLayouts(llvm::SmallVector<std::tuple<Operation *, int, Operation *>>
 
     // If that still didn't work, bail on pipelining this load.
     if (!loadInfo.sharedEncoding) {
+      LDBG("unable to get generic shared encoding, bailing");
       continue;
     }
     loadToInfo[op] = loadInfo;
@@ -592,6 +662,11 @@ scheduleLoads(scf::ForOp forOp, tt::CoarseSchedule &schedule,
   llvm::MapVector<Operation *, LoadInfo> loadToInfo =
       assignMemoryLayouts(loadOpToIndLevelAndUse, axisInfoAnalysis);
 
+  LLVM_DEBUG({
+      LDBG("Found " << loadToInfo.size() << " loadToInfo");
+  });
+
+
   if (loadToInfo.empty())
     return {};
 
@@ -604,6 +679,10 @@ scheduleLoads(scf::ForOp forOp, tt::CoarseSchedule &schedule,
   }
   unsigned stagesBetweenLoads =
       ceil<unsigned>(numStages - 2, maxIndirectionLevel + 1);
+
+  LLVM_DEBUG({
+    LDBG("stagesBetweenLoads: " << stagesBetweenLoads);
+  });
 
   tt::CoarseSchedule::Cluster rootUsersCluster = schedule.clusters.newAtFront();
   // Put the root uses of the loads in the last stage.

@@ -49,8 +49,10 @@ mlir::LogicalResult WarpGroupDotOp::inferReturnTypes(
     assert(bEnc);
     Dialect &dialect = aEnc.getDialect();
     auto interface = dyn_cast<DialectInferLayoutInterface>(&dialect);
-    if (interface->inferDotOpEncoding(aEnc, 0, retEnc, location).failed())
-      return mlir::failure();
+   //auto aElemTy = cast<TensorOrMemDesc>(operands[0].getType()).getElementType();
+    // For F32, we can have the A operand be in registers
+    //if (interface->inferDotOpEncoding(aEnc, 0, retEnc, location).failed() && !aElemTy.isF32())
+    //  return mlir::failure();
     if (interface->inferDotOpEncoding(bEnc, 1, retEnc, location).failed())
       return mlir::failure();
   }
