@@ -968,27 +968,20 @@ static Value createAlloc(scf::ForOp &forOp, Operation *loadOp,
   SmallVector<int64_t> bufferShape(ty.getShape().begin(), ty.getShape().end());
   bufferShape.insert(bufferShape.begin(), distance);
 
+  if (auto allocOp = dyn_cast<ttg::LocalAllocOp>(*loadOp->getUsers().begin())) {
+    auto sharedEncNew = cast<ttg::SharedEncodingAttr>(allocOp.getType().getEncoding());
 
-  // This is safe because we wouldn't be pipelining the load otherwise.
-  auto allocOp = cast<ttg::LocalAllocOp>(*loadOp->getUsers().begin());
-  auto sharedEncNew = cast<ttg::SharedEncodingAttr>(allocOp.getType().getEncoding());
+    auto newOrder = sharedEncNew.getOrder();
+    auto oldOrder = ttg::getOrder(ty.getEncoding());
 
-  // MMA V3 case.
-  auto newOrder = sharedEncNew.getOrder();
-  auto oldOrder = ttg::getOrder(ty.getEncoding());
-
-  // The operand of MMAv3 is in SharedEncoding and its order should not
-  // be changed after FuseTranspositions Pass. So we only pipeline the
-  // load if the order of the loaded BlockedEncoding is the same as the
-  // order of the SharedEncoding it is converted to.
-
-  if (oldOrder != newOrder) {
-    Type memdescType = mlir::triton::MemDescType::get(
-    bufferShape, ty.getElementType(), sharedEncNew, sharedMemorySpace,
-    /*mutableMemory*/ true);
-    Value alloc = builder.create<mlir::triton::gpu::LocalAllocOp>(
-        loadOp->getLoc(), memdescType, Value());
-    return alloc;
+    if (oldOrder != newOrder) {
+      Type memdescType = mlir::triton::MemDescType::get(
+      bufferShape, ty.getElementType(), sharedEncNew, sharedMemorySpace,
+      /*mutableMemory*/ true);
+      Value alloc = builder.create<mlir::triton::gpu::LocalAllocOp>(
+          loadOp->getLoc(), memdescType, Value());
+      return alloc;
+    }
   }
 
   Type memdescType = mlir::triton::MemDescType::get(
