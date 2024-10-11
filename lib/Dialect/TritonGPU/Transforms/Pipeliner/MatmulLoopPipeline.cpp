@@ -123,8 +123,9 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
   Attribute sharedMemorySpace =
       triton::gpu::SharedMemorySpaceAttr::get(forOp.getContext());
 
+  auto subviewTyShape = allocTy.getShape().drop_front();
   tt::MemDescType subviewTy = tt::MemDescType::get(
-      allocTy.getShape().drop_front(), allocTy.getElementType(),
+      subviewTyShape, allocTy.getElementType(),
       allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
 
   auto view =
@@ -163,7 +164,17 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
 
       LDBG("Load " << *loadOp << "oldOrder != newOrder");
 
+      // Create a new memdesc type
+      tt::MemDescType newOrderSubviewTy = tt::MemDescType::get(
+          subviewTyShape, allocTy.getElementType(),
+          allocTyNew.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
+
+      // Replace the local alloc with a new one
+      //auto newAllocOp = builder.create<triton::gpu::LocalAllocOp>(allocOp.getLoc(), newOrderSubviewTy, allocOp.getSrc());
+      //::triton::replaceUsesAndPropagateType(builder, localAlloc, newAllocOp);
+
       // Load into blocked
+      /*
       auto oldRetType = cast<RankedTensorType>(loadOp.getType());
       ttg::BlockedEncodingAttr oldEncoding = cast<ttg::BlockedEncodingAttr>(oldRetType.getEncoding());
       auto oldTy =
@@ -171,7 +182,10 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
       auto localLoad =
           builder.create<ttg::LocalLoadOp>(loc, oldTy, viewLoad.getResult());
       schedule.insert(localLoad, stage, cluster);
-
+      */
+      auto oldRetType = cast<RankedTensorType>(loadOp.getType());
+      ttg::BlockedEncodingAttr oldEncoding = cast<ttg::BlockedEncodingAttr>(oldRetType.getEncoding());
+      //ttg::SharedEncodingAttr oldEncoding = cast<ttg::SharedEncodingAttr>(allocTy.getEncoding());
       // Now we need to convert to the new order
       ttg::BlockedEncodingAttr newEncoding = ttg::BlockedEncodingAttr::get(
             oldEncoding.getContext(),
@@ -183,24 +197,32 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
                                     oldEncoding.getCTAsPerCGA(),
                                     oldEncoding.getCTASplitNum(),
                                     oldEncoding.getCTAOrder()));
+
       auto newTy =
-          RankedTensorType::get(localAlloc.getType().getShape(), localAlloc.getType().getElementType(), newEncoding);
-      auto cvt =
-          builder.create<ttg::ConvertLayoutOp>(loc, newTy, localLoad.getResult());
-      schedule.insert(cvt, stage, cluster);
+          RankedTensorType::get(subviewTyShape, localAlloc.getType().getElementType(), newEncoding);
+      auto localLoad2 =
+          builder.create<ttg::LocalLoadOp>(loc, newTy, viewLoad.getResult());
+      schedule.insert(localLoad2, numStages - 2, cluster);
+
+      //auto cvt =
+      //    builder.create<ttg::ConvertLayoutOp>(loc, newTy, localLoad.getResult());
+      //schedule.insert(cvt, stage, cluster);
 
       // Now convert to a memdesc?
       // Write to shared memory, create a memdesc for it
-      auto storeOp =
-          builder.create<ttg::LocalStoreOp>(loc, cvt.getResult(), viewLoad);
-      schedule.insert(storeOp, stage, cluster);
+      //SmallVector<Value> copyOffsets(allocTy.getRank(), zero);
+      //copyOffsets[0] = insertIdx;
 
-      // Create a new memdesc type
-      tt::MemDescType newOrderSubviewTy = tt::MemDescType::get(
-        allocTy.getShape().drop_front(), allocTy.getElementType(),
-        allocTyNew.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
+      auto write =
+        builder.create<ttg::MemDescSubviewOp>(loc, newOrderSubviewTy, alloc, copyOffsets);
+
+      auto storeOp =
+          builder.create<ttg::LocalStoreOp>(localLoad2.getLoc(), localLoad2.getResult(), write);
+      schedule.insert(storeOp, numStages - 2, cluster);
+
       auto newOrderLoad =
-        builder.create<ttg::MemDescSubviewOp>(loc, newOrderSubviewTy, alloc, loadOffsets);
+        builder.create<ttg::MemDescSubviewOp>(storeOp.getLoc(), newOrderSubviewTy, alloc, loadOffsets);
+      schedule.insert(newOrderLoad, numStages - 2, cluster);
 
       mlir::triton::replaceUsesAndPropagateType(builder, allocOp, newOrderLoad.getResult());
       allocOp.erase();
@@ -945,9 +967,34 @@ static Value createAlloc(scf::ForOp &forOp, Operation *loadOp,
   auto ty = cast<RankedTensorType>(loadOp->getResultTypes()[0]);
   SmallVector<int64_t> bufferShape(ty.getShape().begin(), ty.getShape().end());
   bufferShape.insert(bufferShape.begin(), distance);
+
+
+  // This is safe because we wouldn't be pipelining the load otherwise.
+  auto allocOp = cast<ttg::LocalAllocOp>(*loadOp->getUsers().begin());
+  auto sharedEncNew = cast<ttg::SharedEncodingAttr>(allocOp.getType().getEncoding());
+
+  // MMA V3 case.
+  auto newOrder = sharedEncNew.getOrder();
+  auto oldOrder = ttg::getOrder(ty.getEncoding());
+
+  // The operand of MMAv3 is in SharedEncoding and its order should not
+  // be changed after FuseTranspositions Pass. So we only pipeline the
+  // load if the order of the loaded BlockedEncoding is the same as the
+  // order of the SharedEncoding it is converted to.
+
+  if (oldOrder != newOrder) {
+    Type memdescType = mlir::triton::MemDescType::get(
+    bufferShape, ty.getElementType(), sharedEncNew, sharedMemorySpace,
+    /*mutableMemory*/ true);
+    Value alloc = builder.create<mlir::triton::gpu::LocalAllocOp>(
+        loadOp->getLoc(), memdescType, Value());
+    return alloc;
+  }
+
   Type memdescType = mlir::triton::MemDescType::get(
       bufferShape, ty.getElementType(), sharedEnc, sharedMemorySpace,
       /*mutableMemory*/ true);
+
   Value alloc = builder.create<mlir::triton::gpu::LocalAllocOp>(
       loadOp->getLoc(), memdescType, Value());
   return alloc;
