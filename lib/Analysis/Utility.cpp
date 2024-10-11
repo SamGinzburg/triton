@@ -571,6 +571,7 @@ bool matchMmaV3AndDotOperandLayout(RankedTensorType srcTy,
   return ans;
 }
 
+// TODO FIX?
 bool cvtReordersRegisters(RankedTensorType srcTy, RankedTensorType dstTy) {
   MLIRContext *ctx = srcTy.getContext();
   std::optional<LinearLayout> srcLayout =

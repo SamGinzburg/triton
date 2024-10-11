@@ -432,6 +432,16 @@ public:
                    (eltTypeC == WGMMAEltType::s32) &&
                    (m == 64 && 8 <= n && n <= 224 && k == 32);
     }
+
+    std::string err = "WGMMA type or shape is not supported: " +
+    std::to_string(m) + ", " +
+    std::to_string(n) + ", " +
+    std::to_string(k) + ", supported: " +
+    std::to_string(supported) + ", " +
+    std::to_string(transA) + ", " +
+    std::to_string(transB);
+    llvm::errs() << err << "\n";
+
     assert(supported && "WGMMA type or shape is not supported");
 
     // Operands

@@ -51,6 +51,10 @@ struct LoadInfo {
 
 } // namespace
 
+
+static std::optional<ttg::SharedEncodingAttr> getSharedEncIfAllUsersAreDotEnc(Value val);
+
+
 static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
                             Value insertIdx, Value extractIdx,
                             tt::CoarseSchedule &schedule,
@@ -104,6 +108,8 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
     localAlloc = lAlloc;
   }
 
+
+  // If we have to change the order,
   tt::MemDescType allocTy = cast<tt::MemDescType>(alloc.getType());
   tt::MemDescType allocTyNew;
   if (loadToInfo[loadOp].usedByDot && oldOrder != newOrder && localAlloc) {
@@ -119,7 +125,7 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
 
   tt::MemDescType subviewTy = tt::MemDescType::get(
       allocTy.getShape().drop_front(), allocTy.getElementType(),
-      allocTyNew.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
+      allocTy.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
 
   auto view =
       builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, copyOffsets);
@@ -143,45 +149,64 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
   loadOffsets[0] = extractIdx;
   auto viewLoad =
       builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
+
+
+
   if (isMMV3Load) {
     LDBG("createAsyncCopy: isMMV3Load");
-    auto alloc = cast<ttg::LocalAllocOp>((*loadOp->getUsers().begin()));
+    auto allocOp = cast<ttg::LocalAllocOp>((*loadOp->getUsers().begin()));
 
 
     // If this is a 32-bit load and it is used by a dot-op
     // we need to transpose the B-operand via layout conversion
-
-    if (loadToInfo[loadOp].usedByDot && oldOrder != newOrder) {
+    if (loadToInfo[loadOp].sharedEncoding && loadToInfo[loadOp].usedByDot && oldOrder != newOrder) {
 
       LDBG("Load " << *loadOp << "oldOrder != newOrder");
 
-      /*
-      // Load to #blocked
-      auto localLoad = builder.create<ttg::LocalLoadOp>(
-          loc, loadOp.getType(), viewLoad.getResult(), wait->getResult(0));
-      //schedule.insert(localLoad, stage, cluster);
+      // Load into blocked
+      auto oldRetType = cast<RankedTensorType>(loadOp.getType());
+      ttg::BlockedEncodingAttr oldEncoding = cast<ttg::BlockedEncodingAttr>(oldRetType.getEncoding());
+      auto oldTy =
+          RankedTensorType::get(localAlloc.getType().getShape(), localAlloc.getType().getElementType(), oldEncoding);
+      auto localLoad =
+          builder.create<ttg::LocalLoadOp>(loc, oldTy, viewLoad.getResult());
+      schedule.insert(localLoad, stage, cluster);
 
-      //auto localLoadResult = localLoad.getResult();
+      // Now we need to convert to the new order
+      ttg::BlockedEncodingAttr newEncoding = ttg::BlockedEncodingAttr::get(
+            oldEncoding.getContext(),
+            oldEncoding.getSizePerThread(),
+            oldEncoding.getThreadsPerWarp(),
+            oldEncoding.getWarpsPerCTA(),
+            newOrder, // Convert to the new order
+            ttg::CTALayoutAttr::get(oldEncoding.getContext(),
+                                    oldEncoding.getCTAsPerCGA(),
+                                    oldEncoding.getCTASplitNum(),
+                                    oldEncoding.getCTAOrder()));
+      auto newTy =
+          RankedTensorType::get(localAlloc.getType().getShape(), localAlloc.getType().getElementType(), newEncoding);
+      auto cvt =
+          builder.create<ttg::ConvertLayoutOp>(loc, newTy, localLoad.getResult());
+      schedule.insert(cvt, stage, cluster);
 
-      // Convert to the new order
-      auto newOrderTy = RankedTensorType::get(
-          ty.getShape(), ty.getElementType(), localAlloc.getType().getEncoding());
-      auto orderConv = builder.create<triton::gpu::ConvertLayoutOp>(
-            loc, newOrderTy, localLoad);
-      //schedule.insert(orderConv, stage, cluster);
-      //auto newOrderResult = orderConv.getResult();
+      // Now convert to a memdesc?
+      // Write to shared memory, create a memdesc for it
+      auto storeOp =
+          builder.create<ttg::LocalStoreOp>(loc, cvt.getResult(), viewLoad);
+      schedule.insert(storeOp, stage, cluster);
 
-      auto sharedLoad = builder.create<ttg::LocalLoadOp>(
-        loc, loadOp.getType(), orderConv.getResult());
-      auto result = sharedLoad->getResults();
-      */
-      //alloc->replaceAllUsesWith(orderConv.getResult());
+      // Create a new memdesc type
+      tt::MemDescType newOrderSubviewTy = tt::MemDescType::get(
+        allocTy.getShape().drop_front(), allocTy.getElementType(),
+        allocTyNew.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
+      auto newOrderLoad =
+        builder.create<ttg::MemDescSubviewOp>(loc, newOrderSubviewTy, alloc, loadOffsets);
 
-      mlir::triton::replaceUsesAndPropagateType(builder, alloc, viewLoad.getResult());
-      alloc.erase();
+      mlir::triton::replaceUsesAndPropagateType(builder, allocOp, newOrderLoad.getResult());
+      allocOp.erase();
     } else {
-      replaceUsesAndPropagateType(builder, alloc, viewLoad.getResult());
-      alloc.erase();
+      replaceUsesAndPropagateType(builder, allocOp, viewLoad.getResult());
+      allocOp.erase();
     }
   } else {
     SmallVector<ttg::LocalAllocOp> allocsToErase;
@@ -337,6 +362,26 @@ getBlockedEncoding(tt::LoadOp loadOp, tt::ModuleAxisInfoAnalysis &axisInfo) {
   ttg::CTALayoutAttr ctaLayout = ttg::getCTALayout(ty.getEncoding());
   return ttg::BlockedEncodingAttr::get(loadOp->getContext(), ty.getShape(),
                                        sizePerThread, order, numWarps,
+                                       threadsPerWarp, ctaLayout);
+}
+
+static ttg::BlockedEncodingAttr
+getBlockedEncodingWithOrder(tt::LoadOp loadOp, llvm::ArrayRef<unsigned> order) {
+  Value src = loadOp.getPtr();
+  auto ty = cast<RankedTensorType>(src.getType());
+  auto mod = loadOp->getParentOfType<ModuleOp>();
+  tt::ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
+
+  int numWarps = ttg::TritonGPUDialect::getNumWarps(mod);
+  int threadsPerWarp = ttg::TritonGPUDialect::getThreadsPerWarp(mod);
+  ttg::CTALayoutAttr ctaLayout = ttg::getCTALayout(ty.getEncoding());
+  llvm::SmallVector<unsigned> newOrder(order);
+  unsigned currPerThread = getNumElementsPerThread(loadOp, newOrder, axisInfoAnalysis);
+  SmallVector<unsigned> sizePerThread(newOrder.size(), 1);
+  sizePerThread[newOrder[0]] = currPerThread;
+
+  return ttg::BlockedEncodingAttr::get(loadOp->getContext(), ty.getShape(),
+                                       sizePerThread, newOrder, numWarps,
                                        threadsPerWarp, ctaLayout);
 }
 

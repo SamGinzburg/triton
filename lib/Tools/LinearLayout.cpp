@@ -292,6 +292,7 @@ LinearLayout::checkInvariants(bool requireSurjective) {
   for (const auto &[inDim, inDimBases] : bases) {
     for (const auto &basis : inDimBases) {
       if (llvm::any_of(basis, [](int32_t b) { return b < 0; })) {
+        LDBG("negative");
         return "Invalid bases passed to LinearLayout.  Expected all basis "
                "values to be non-negative, but found a negative value for "
                "in dimension '" +
@@ -304,6 +305,8 @@ LinearLayout::checkInvariants(bool requireSurjective) {
   for (const auto &[inDim, inDimBases] : bases) {
     for (const auto &basis : inDimBases) {
       if (basis.size() != outDims.size()) {
+        LDBG("basis != outdims: basis, " << basis.size() << " outDims, " << outDims.size());
+        LDBG("failed dim: " << inDim.str());
         return "Invalid bases passed to LinearLayout.  Expect all bases to "
                "have the same size, equal to outDimNames.size() (" +
                std::to_string(outDims.size()) +
@@ -316,6 +319,8 @@ LinearLayout::checkInvariants(bool requireSurjective) {
   // Check that the out-dim sizes are powers of 2.
   for (const auto &[outDim, size] : outDims) {
     if (!llvm::isPowerOf2_32(size)) {
+      LDBG("pow2");
+
       return "Invalid out-dim size " + std::to_string(size) + " for out-dim '" +
              outDim.str() + "'.  Out-dim sizes must be powers of 2.\n";
     }
@@ -327,6 +332,9 @@ LinearLayout::checkInvariants(bool requireSurjective) {
     for (const auto &basis : inDimBases) {
       for (int i = 0; i < basis.size(); i++) {
         if (basis[i] >= outDims[outDimNames[i]]) {
+            LDBG("outdimnames: " << outDimNames[i]);
+            LDBG("outdim smaller than: " << basis[i] << " >= " << outDims[outDimNames[i]]);
+
           return "Invalid basis " + std::to_string(basis[i]) + " for in-dim '" +
                  inDim.str() + "' and out-dim '" + outDimNames[i].str() +
                  "'.  Basis must be less than the out-dim size.\n";
@@ -351,6 +359,8 @@ LinearLayout::checkInvariants(bool requireSurjective) {
       getTotalOutDimSizeLog2();
 
   if (requireSurjective && !surjective) {
+    LDBG("surjective");
+
     return "Layout is expected to be surjective, i.e. every `out` coordinate "
            "can be reached by some `in` coordinate, but was not:" +
            toString();
@@ -647,14 +657,35 @@ LinearLayout::divideRight(const LinearLayout &divisor) {
   // Strip off the top N bases for each input dimension of divisor.  This
   // gives a candidate quotient.  Then check if quotient * divisor equals
   // `this`.
+
+  // this's bases don't match the divisors bases
   BasesT newBases = bases;
+
+  LDBG("oldBases pre resize: " << triton::join(newBases, ", ", [](auto &p) {
+         return p.first.str() + "=" + std::to_string(p.second.size());
+      }));
+
   for (StringAttr inDim : divisor.getInDimNames()) {
     if (getInDimSizeLog2(inDim) < divisor.getInDimSizeLog2(inDim)) {
       return std::nullopt;
     }
+    // this is std::vector
     auto &newInDimBases = newBases[inDim];
-    newInDimBases.resize(newInDimBases.size() -
-                         divisor.getInDimSizeLog2(inDim));
+    /*
+    32, 4, 1
+    newInDimBases.size():            5, 2, 0
+    divisor.getInDimSizeLog2(inDim): 5, 2, 0
+
+    diff, 0, 0, 0?
+
+    what does resize(0) do?
+    */
+    //LDBG("getInDimSizeLog2(inDim):   " << getInDimSizeLog2(inDim));
+    LDBG("newInDimBases.size():   " << newInDimBases.size());
+    LDBG("divisor.getInDimSizeLog2(inDim):   " << divisor.getInDimSizeLog2(inDim));
+
+      newInDimBases.resize(newInDimBases.size() -
+                          divisor.getInDimSizeLog2(inDim));
   }
 
   // Check if the size of the new out-dims are large enough.
@@ -666,6 +697,7 @@ LinearLayout::divideRight(const LinearLayout &divisor) {
       return std::nullopt;
     }
     newOutDims[outDimName] /= outDimSize;
+    LDBG("newOutDims[outDimName]= " << newOutDims[outDimName]);
   }
 
   LDBG("Checking candidate_quotient * divisor == *this");
@@ -677,6 +709,25 @@ LinearLayout::divideRight(const LinearLayout &divisor) {
   LDBG("newOutDims: " << triton::join(newOutDims, ", ", [](auto &p) {
          return p.first.str() + "=" + std::to_string(p.second);
        }));
+
+  std::vector<StringAttr> outDimNamesVec;
+  for (const auto [outDimName, outDimSize] : newOutDims) {
+    outDimNamesVec.push_back(outDimName);
+  }
+
+  for (const auto &[inDim, inDimBases] : newBases) {
+    for (const auto &basis : inDimBases) {
+      for (int i = 0; i < basis.size(); i++) {
+        int32_t &size = newOutDims[outDimNamesVec[i]];
+        size = std::max<int32_t>(size, llvm::NextPowerOf2(basis[i]));
+      }
+    }
+  }
+
+  LDBG("newBases post pow2: " << triton::join(newBases, ", ", [](auto &p) {
+        return p.first.str() + "=" + std::to_string(p.second.size());
+  }));
+
   std::optional<LinearLayout> candidateQuotient = LinearLayout::tryCreate(
       std::move(newBases), std::move(newOutDims.takeVector()),
       /*requireSurjective=*/false);
