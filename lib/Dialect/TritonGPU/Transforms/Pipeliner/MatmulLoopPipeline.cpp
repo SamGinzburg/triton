@@ -91,32 +91,7 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
     if (other)
       other = convertBlockLayout(other);
   }
-
-  // Check if oldOrder == newOrder
-  //  if (!loadOp->hasOneUse()) TODO ERR
-  //  return false;
-
-  // this can't fail if we are pipelining already
-  SmallVector<unsigned> oldOrder;
-  llvm::ArrayRef<unsigned int> newOrder;
-  ttg::LocalAllocOp localAlloc = nullptr;
-  if (auto lAlloc = dyn_cast<ttg::LocalAllocOp>((*loadOp->getUsers().begin()))) {
-    auto sharedEnc = dyn_cast<ttg::SharedEncodingAttr>(lAlloc.getType().getEncoding());
-    newOrder = sharedEnc.getOrder();
-    auto ty = cast<RankedTensorType>(loadOp->getResultTypes()[0]);
-    oldOrder = ttg::getOrder(ty.getEncoding());
-    localAlloc = lAlloc;
-  }
-
-
-  // If we have to change the order,
   tt::MemDescType allocTy = cast<tt::MemDescType>(alloc.getType());
-  tt::MemDescType allocTyNew;
-  if (loadToInfo[loadOp].usedByDot && oldOrder != newOrder && localAlloc) {
-    allocTyNew = cast<tt::MemDescType>(localAlloc.getType());
-  } else {
-    allocTyNew = allocTy;
-  }
 
   SmallVector<Value> copyOffsets(allocTy.getRank(), zero);
   copyOffsets[0] = insertIdx;
@@ -152,37 +127,27 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
       builder.create<ttg::MemDescSubviewOp>(loc, subviewTy, alloc, loadOffsets);
 
 
+  SmallVector<unsigned> oldOrder;
+  llvm::ArrayRef<unsigned int> newOrder;
+  ttg::LocalAllocOp localAlloc = nullptr;
+  if (auto lAlloc = dyn_cast<ttg::LocalAllocOp>((*loadOp->getUsers().begin()))) {
+    auto sharedEnc = dyn_cast<ttg::SharedEncodingAttr>(lAlloc.getType().getEncoding());
+    newOrder = sharedEnc.getOrder();
+    auto ty = cast<RankedTensorType>(loadOp->getResultTypes()[0]);
+    oldOrder = ttg::getOrder(ty.getEncoding());
+    localAlloc = lAlloc;
+  }
+
 
   if (isMMV3Load) {
     LDBG("createAsyncCopy: isMMV3Load");
     auto allocOp = cast<ttg::LocalAllocOp>((*loadOp->getUsers().begin()));
 
-
-    // If this is a 32-bit load and it is used by a dot-op
-    // we need to transpose the B-operand via layout conversion
-    if (loadToInfo[loadOp].sharedEncoding && loadToInfo[loadOp].usedByDot && oldOrder != newOrder) {
-
+    if (localAlloc && oldOrder != newOrder) {
       LDBG("Load " << *loadOp << "oldOrder != newOrder");
 
-      // Create a new memdesc type
-      tt::MemDescType newOrderSubviewTy = tt::MemDescType::get(
-          subviewTyShape, allocTy.getElementType(),
-          allocTyNew.getEncoding(), sharedMemorySpace, /*mutableMemory=*/true);
-
-      // Replace the local alloc with a new one
-      //auto newAllocOp = builder.create<triton::gpu::LocalAllocOp>(allocOp.getLoc(), newOrderSubviewTy, allocOp.getSrc());
-      //::triton::replaceUsesAndPropagateType(builder, localAlloc, newAllocOp);
 
       // Load into blocked
-      /*
-      auto oldRetType = cast<RankedTensorType>(loadOp.getType());
-      ttg::BlockedEncodingAttr oldEncoding = cast<ttg::BlockedEncodingAttr>(oldRetType.getEncoding());
-      auto oldTy =
-          RankedTensorType::get(localAlloc.getType().getShape(), localAlloc.getType().getElementType(), oldEncoding);
-      auto localLoad =
-          builder.create<ttg::LocalLoadOp>(loc, oldTy, viewLoad.getResult());
-      schedule.insert(localLoad, stage, cluster);
-      */
       auto oldRetType = cast<RankedTensorType>(loadOp.getType());
       ttg::BlockedEncodingAttr oldEncoding = cast<ttg::BlockedEncodingAttr>(oldRetType.getEncoding());
       //ttg::SharedEncodingAttr oldEncoding = cast<ttg::SharedEncodingAttr>(allocTy.getEncoding());
@@ -200,31 +165,31 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
 
       auto newTy =
           RankedTensorType::get(subviewTyShape, localAlloc.getType().getElementType(), newEncoding);
-      auto localLoad2 =
+      auto localLoad =
           builder.create<ttg::LocalLoadOp>(loc, newTy, viewLoad.getResult());
-      schedule.insert(localLoad2, numStages - 2, cluster);
+      schedule.insert(localLoad, numStages - 2, cluster);
 
-      //auto cvt =
-      //    builder.create<ttg::ConvertLayoutOp>(loc, newTy, localLoad.getResult());
-      //schedule.insert(cvt, stage, cluster);
+      // Convert the alloc value into the new order
+      auto correctOrderSharedEnc = dyn_cast<ttg::SharedEncodingAttr>(localAlloc.getType().getEncoding());
+      tt::MemDescType newOrderSubviewTy = tt::MemDescType::get(
+          subviewTyShape, allocTy.getElementType(),
+          correctOrderSharedEnc, sharedMemorySpace, true);
 
-      // Now convert to a memdesc?
-      // Write to shared memory, create a memdesc for it
-      //SmallVector<Value> copyOffsets(allocTy.getRank(), zero);
-      //copyOffsets[0] = insertIdx;
-
-      auto write =
+      // Now write into smem, because users of this load expect a memdesc (in the correct order)
+      auto writeMemDesc =
         builder.create<ttg::MemDescSubviewOp>(loc, newOrderSubviewTy, alloc, copyOffsets);
 
+
       auto storeOp =
-          builder.create<ttg::LocalStoreOp>(localLoad2.getLoc(), localLoad2.getResult(), write);
+          builder.create<ttg::LocalStoreOp>(localLoad.getLoc(), localLoad.getResult(), writeMemDesc);
       schedule.insert(storeOp, numStages - 2, cluster);
 
-      auto newOrderLoad =
-        builder.create<ttg::MemDescSubviewOp>(storeOp.getLoc(), newOrderSubviewTy, alloc, loadOffsets);
-      schedule.insert(newOrderLoad, numStages - 2, cluster);
+      // Lastly, reload the smem we just wrote to with an updated memdesc
+      //auto viewLoadNewOrder =
+      //  builder.create<ttg::MemDescSubviewOp>(loc, newOrderSubviewTy, alloc, loadOffsets);
+      //schedule.insert(viewLoadNewOrder, numStages - 2, cluster);
 
-      mlir::triton::replaceUsesAndPropagateType(builder, allocOp, newOrderLoad.getResult());
+      mlir::triton::replaceUsesAndPropagateType(builder, allocOp, storeOp.getDst());
       allocOp.erase();
     } else {
       replaceUsesAndPropagateType(builder, allocOp, viewLoad.getResult());
@@ -352,6 +317,8 @@ getSharedEncIfAllUsersAreDotEnc(Value val) {
           cast<TensorOrMemDesc>(user->getResult(0).getType()).getEncoding());
       if (!dotOpEnc)
         return std::nullopt;
+      LDBG("dotOpEnc is not null!!!!!!");
+
       auto srcTy = cast<TensorOrMemDesc>(val.getType());
       auto CTALayout = ttg::getCTALayout(srcTy.getEncoding());
       auto order = ttg::getOrder(srcTy.getEncoding());
@@ -974,12 +941,21 @@ static Value createAlloc(scf::ForOp &forOp, Operation *loadOp,
     auto newOrder = sharedEncNew.getOrder();
     auto oldOrder = ttg::getOrder(ty.getEncoding());
 
-    if (oldOrder != newOrder) {
+    if (oldOrder != newOrder && false) {
+      // use the oldOrder for reads, this avoids smem bank conflicts and gmem issues
+      Type memdescTypeOld = mlir::triton::MemDescType::get(
+        bufferShape, ty.getElementType(), sharedEnc, sharedMemorySpace,
+        /*mutableMemory*/ true);
+
       Type memdescType = mlir::triton::MemDescType::get(
       bufferShape, ty.getElementType(), sharedEncNew, sharedMemorySpace,
       /*mutableMemory*/ true);
+
       Value alloc = builder.create<mlir::triton::gpu::LocalAllocOp>(
-          loadOp->getLoc(), memdescType, Value());
+          loadOp->getLoc(), memdescTypeOld, Value());
+
+      // Okay, now load
+
       return alloc;
     }
   }
