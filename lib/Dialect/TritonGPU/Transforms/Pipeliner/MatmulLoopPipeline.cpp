@@ -143,7 +143,7 @@ static void createAsyncCopy(scf::ForOp &forOp, tt::LoadOp loadOp, Value alloc,
     LDBG("createAsyncCopy: isMMV3Load");
     auto allocOp = cast<ttg::LocalAllocOp>((*loadOp->getUsers().begin()));
 
-    if (localAlloc && oldOrder != newOrder) {
+    if (localAlloc && oldOrder != newOrder && false) {
       LDBG("Load " << *loadOp << "oldOrder != newOrder");
 
 
