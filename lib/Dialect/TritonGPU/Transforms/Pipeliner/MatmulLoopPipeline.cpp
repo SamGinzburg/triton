@@ -941,7 +941,7 @@ static Value createAlloc(scf::ForOp &forOp, Operation *loadOp,
     auto newOrder = sharedEncNew.getOrder();
     auto oldOrder = ttg::getOrder(ty.getEncoding());
 
-    if (oldOrder != newOrder && false) {
+    if (oldOrder != newOrder) {
       // use the oldOrder for reads, this avoids smem bank conflicts and gmem issues
       Type memdescTypeOld = mlir::triton::MemDescType::get(
         bufferShape, ty.getElementType(), sharedEnc, sharedMemorySpace,
@@ -952,7 +952,7 @@ static Value createAlloc(scf::ForOp &forOp, Operation *loadOp,
       /*mutableMemory*/ true);
 
       Value alloc = builder.create<mlir::triton::gpu::LocalAllocOp>(
-          loadOp->getLoc(), memdescTypeOld, Value());
+          loadOp->getLoc(), memdescType, Value());
 
       // Okay, now load
 
