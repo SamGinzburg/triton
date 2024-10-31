@@ -57,6 +57,30 @@ mlir::LogicalResult WarpGroupDotOp::inferReturnTypes(
   return mlir::success();
 }
 
+  mlir::LogicalResult WarpGroupDotOpFP32::inferReturnTypes(
+    MLIRContext *context, std::optional<Location> location, ValueRange operands,
+    DictionaryAttr attributes, OpaqueProperties properties, RegionRange regions,
+    SmallVectorImpl<Type> &inferredReturnTypes) {
+  // type is the same as the accumulator
+  auto accTy = cast<RankedTensorType>(operands[2].getType());
+  inferredReturnTypes.push_back(accTy);
+
+  // verify encodings
+  auto aEnc = cast<TensorOrMemDesc>(operands[0].getType()).getEncoding();
+  auto bEnc = cast<TensorOrMemDesc>(operands[1].getType()).getEncoding();
+  auto retEnc = accTy.getEncoding();
+  if (aEnc) {
+    assert(bEnc);
+    Dialect &dialect = aEnc.getDialect();
+    auto interface = dyn_cast<DialectInferLayoutInterface>(&dialect);
+    if (interface->inferDotOpEncoding(aEnc, 0, retEnc, location).failed())
+      return mlir::failure();
+    if (interface->inferDotOpEncoding(bEnc, 1, retEnc, location).failed())
+      return mlir::failure();
+  }
+  return mlir::success();
+}
+
 void WarpGroupDotOp::getEffects(
     SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
         &effects) {
@@ -69,7 +93,18 @@ void WarpGroupDotOp::getEffects(
     effects.emplace_back(MemoryEffects::Read::get(), &b,
                          mlir::triton::gpu::SharedMemory::get());
 }
-
+void WarpGroupDotOpFP32::getEffects(
+    SmallVectorImpl<SideEffects::EffectInstance<MemoryEffects::Effect>>
+        &effects) {
+  auto &a = getAMutable();
+  auto &b = getBMutable();
+  if (isa<MemDescType>(a.get().getType()))
+    effects.emplace_back(MemoryEffects::Read::get(), &a,
+                         mlir::triton::gpu::SharedMemory::get());
+  if (isa<MemDescType>(b.get().getType()))
+    effects.emplace_back(MemoryEffects::Read::get(), &b,
+                         mlir::triton::gpu::SharedMemory::get());
+}
 bool WarpGroupDotOp::needsPartialAccumulator() {
   const auto &a = getA();
   const auto &d = getD();
@@ -81,6 +116,18 @@ bool WarpGroupDotOp::needsPartialAccumulator() {
   uint32_t maxNumImpreciseAcc = getMaxNumImpreciseAcc();
   return isFP8 && accFP32 && maxNumImpreciseAcc <= aTensorTy.getShape()[1];
 }
+bool WarpGroupDotOpFP32::needsPartialAccumulator() {
+  const auto &a = getA();
+  const auto &d = getD();
+  auto aTensorTy = cast<TensorOrMemDesc>(a.getType());
+  auto aElTy = cast<TensorOrMemDesc>(a.getType()).getElementType();
+  bool isFP8 = aElTy.isFloat8E5M2() || aElTy.isFloat8E4M3FN() ||
+               aElTy.isFloat8E5M2FNUZ() || aElTy.isFloat8E4M3FNUZ();
+  bool accFP32 = cast<TensorOrMemDesc>(d.getType()).getElementType().isF32();
+  uint32_t maxNumImpreciseAcc = getMaxNumImpreciseAcc();
+  return isFP8 && accFP32 && maxNumImpreciseAcc <= aTensorTy.getShape()[1];
+}
+
 
 // -- WarpGroupDotWaitOp --
 LogicalResult WarpGroupDotWaitOp::inferReturnTypes(

@@ -515,3 +515,24 @@ LogicalResult convertWGMMA(triton::nvidia_gpu::WarpGroupDotOp op,
                     op.needsPartialAccumulator(), op.getMaxNumImpreciseAcc(),
                     !op.getIsAsync(), thread);
 }
+
+LogicalResult convertWGMMAFP32(triton::nvidia_gpu::WarpGroupDotOpFP32 op,
+                           triton::nvidia_gpu::WarpGroupDotOpFP32::Adaptor adaptor,
+                           const LLVMTypeConverter *typeConverter,
+                           ConversionPatternRewriter &rewriter, Value thread) {
+
+  //triton::nvidia_gpu::WarpGroupDotOp op = (triton::nvidia_gpu::WarpGroupDotOp)(op1);
+  //triton::nvidia_gpu::WarpGroupDotOp::Adaptor adaptor = (triton::nvidia_gpu::WarpGroupDotOp::Adaptor)(adaptor1);
+  auto AEnc = op.getA().getType().getEncoding();
+  auto BEnc = op.getB().getType().getEncoding();
+  assert(mlir::isa<SharedEncodingAttr>(AEnc) ||
+         mlir::isa<DotOperandEncodingAttr>(AEnc));
+  assert(mlir::isa<SharedEncodingAttr>(BEnc) &&
+         "Operand B should use Shared layout.");
+  return convertDot(typeConverter, rewriter, op.getLoc(), op.getOperation(),  //
+                    op.getA(), op.getB(), op.getC(), op.getD(), op.getUseC(), //
+                    adaptor.getA(), adaptor.getB(), adaptor.getC(),           //
+                    op.getInputPrecision() == InputPrecision::TF32,
+                    op.needsPartialAccumulator(), op.getMaxNumImpreciseAcc(),
+                    !op.getIsAsync(), thread);
+}

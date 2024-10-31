@@ -361,8 +361,7 @@ compared to 1*64 when the hasLeadingOffset is false.
           return get(context, vec, perPhase, maxPhase, order, CTALayout);
         }
 
-        // ---- begin Ampere ----
-        if (mmaEnc.isAmpere()) {
+        if (mmaEnc.isAmpere() || mmaEnc.isHopper()) {
           int perPhase = 128 / (shapePerCTA[order[0]] * 4 / dotOpEnc.getKWidth());
           perPhase = std::max<int>(perPhase, 1);
           std::vector<size_t> matShape = {8, 8, 4 * dotOpEnc.getKWidth()};
@@ -395,13 +394,6 @@ compared to 1*64 when the hasLeadingOffset is false.
           }
 
           llvm_unreachable("invalid operand index");
-        }
-
-        // ---- begin version 3 ----
-        if (mmaEnc.isHopper()) {
-          llvm_unreachable("SharedEncodingAttr builder when the MMAEncodingAttr"
-                           " is Hopper has not been implemented yet");
-          return $_get(context, 1, 1, 1, order, CTALayout, true);
         }
 
         // ---- not implemented ----

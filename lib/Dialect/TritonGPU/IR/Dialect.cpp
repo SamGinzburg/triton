@@ -1074,10 +1074,12 @@ LogicalResult DotOperandEncodingAttr::verify(
     return emitError() << "triton_gpu.dot_op parent paramenter cannot be null";
   }
   if (auto parentAttr = mlir::dyn_cast<NvidiaMmaEncodingAttr>(parent)) {
-    if (kWidth != 0 && !parentAttr.isAmpere())
+    //if (kWidth != 0 && !parentAttr.isAmpere())
+    if (kWidth != 0 && !(parentAttr.isAmpere() || parentAttr.isHopper()))
       return emitError() << "triton_gpu.dot_op kWidth parameter can only be "
                             "non-zero for Ampere MMA parent";
-    if (kWidth == 0 && parentAttr.isAmpere())
+    //if (kWidth == 0 && parentAttr.isAmpere())
+    if (kWidth == 0 && (parentAttr.isAmpere() || parentAttr.isHopper()))
       return emitError()
              << "triton_gpu.dot_op kWidth parameter is mandatory for "
                 "Ampere MMA parent";
@@ -2015,6 +2017,7 @@ int NvidiaMmaEncodingAttr::getMMAv1Vec(int opIdx) const {
 }
 SmallVector<int64_t> NvidiaMmaEncodingAttr::getMMAv2RepForOperand(
     ArrayRef<int64_t> shape, int bitwidth, int kWidth, int opIdx) const {
+  assert(isAmpere() || isHopper());
   auto rank = shape.size();
   auto warpsPerCTA = getWarpsPerCTA();
 
@@ -2023,7 +2026,6 @@ SmallVector<int64_t> NvidiaMmaEncodingAttr::getMMAv2RepForOperand(
       rank == 3
           ? std::max<int64_t>(1, shape[0] / (shapePerWarp[0] * warpsPerCTA[0]))
           : 1;
-  assert(isAmpere());
 
   if (opIdx == 0)
     return {numRepBatch,

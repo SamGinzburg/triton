@@ -27,6 +27,12 @@ LogicalResult convertWGMMA(triton::nvidia_gpu::WarpGroupDotOp op,
                            triton::nvidia_gpu::WarpGroupDotOp::Adaptor adaptor,
                            const LLVMTypeConverter *typeConverter,
                            ConversionPatternRewriter &rewriter, Value thread);
+
+LogicalResult convertWGMMAFP32(triton::nvidia_gpu::WarpGroupDotOpFP32 op,
+                           triton::nvidia_gpu::WarpGroupDotOpFP32::Adaptor adaptor,
+                           const LLVMTypeConverter *typeConverter,
+                           ConversionPatternRewriter &rewriter, Value thread);
+
 namespace {
 struct DotOpConversion : public ConvertOpToLLVMPattern<triton::DotOp> {
   using ConvertOpToLLVMPattern<triton::DotOp>::ConvertOpToLLVMPattern;
@@ -105,6 +111,46 @@ struct WarpGroupDotOpConversion
   }
 };
 
+
+
+struct WarpGroupDotOpFP32Conversion
+    : public ConvertOpToLLVMPattern<triton::nvidia_gpu::WarpGroupDotOpFP32> {
+  using ConvertOpToLLVMPattern<
+      triton::nvidia_gpu::WarpGroupDotOpFP32>::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(triton::nvidia_gpu::WarpGroupDotOpFP32 op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    // D = A * B + C
+    Value A = op.getA();
+    Value D = op.getResult();
+
+    // Here we assume the DotOp's operands always comes from shared memory.
+    auto AShapePerCTA = getShapePerCTA(A.getType());
+    size_t reduceAxis = 1;
+    unsigned K = AShapePerCTA[reduceAxis];
+    bool isOuter = K == 1;
+
+    NvidiaMmaEncodingAttr mmaLayout = dyn_cast<NvidiaMmaEncodingAttr>(
+        cast<RankedTensorType>(D.getType()).getEncoding());
+    if (!isOuter && mmaLayout &&
+        supportMMA(op.getOperand(0), mmaLayout.getVersionMajor())) {
+      if (mmaLayout.isHopper()) {
+        return convertWGMMAFP32(op, adaptor, getTypeConverter(), rewriter,
+                            getThreadId(rewriter, loc));
+      }
+
+      llvm::report_fatal_error(
+          "Unsupported MMA kind found when converting WarpGroupDotOp to LLVM.");
+    }
+
+    llvm::report_fatal_error(
+        "Unsupported WarpGroupDotOp found when converting TritonGPU to LLVM.");
+  }
+};
+
+
 struct WarpGroupDotWaitOpConversion
     : public ConvertOpToLLVMPattern<triton::nvidia_gpu::WarpGroupDotWaitOp> {
   using ConvertOpToLLVMPattern<
@@ -173,5 +219,6 @@ void mlir::triton::NVIDIA::populateDotOpToLLVMPatterns(
     PatternBenefit benefit) {
   patterns.add<DotOpConversion>(typeConverter, benefit);
   patterns.add<WarpGroupDotOpConversion>(typeConverter, benefit);
+  patterns.add<WarpGroupDotOpFP32Conversion>(typeConverter, benefit);
   patterns.add<WarpGroupDotWaitOpConversion>(typeConverter, benefit);
 }

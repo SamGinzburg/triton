@@ -88,11 +88,18 @@ private:
     auto smemObj = getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(),
                                                    llvmElemTy, rewriter);
     Value res;
-    if (!isOuter && mmaLayout.isAmpere()) { // tensor core v2
+    if (isOuter) {
+      assert(false && "MMA Layout does not support outer product");
+      return res;
+    }
+    if (mmaLayout.isHopper() || mmaLayout.isAmpere()) { // tensor core v2 or v3
+      if (mmaLayout.isHopper())
+        assert(dotOperandLayout.getOpIdx() == 0);
+
       res = SharedToDotOperandMMAv2::convertLayout(
           dotOperandLayout.getOpIdx(), rewriter, loc, src, dotOperandLayout,
           smemObj, typeConverter, getThreadId(rewriter, loc));
-    } else if (!isOuter && mmaLayout.isVolta() && isMMA) { // tensor core v1
+    } else if (mmaLayout.isVolta() && isMMA) { // tensor core v1
       bool isMMAv1Row = mmaLayout.getMMAv1IsRow(dotOperandLayout.getOpIdx());
       auto srcSharedLayout =
           cast<SharedEncodingAttr>(src.getType().getEncoding());
