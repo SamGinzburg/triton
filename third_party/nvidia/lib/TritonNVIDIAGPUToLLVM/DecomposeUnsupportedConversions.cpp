@@ -36,6 +36,7 @@ public:
         op.getType().getEncoding());
     MemDescType srcType = op.getSrc().getType();
     auto sharedEncoding = cast<SharedEncodingAttr>(srcType.getEncoding());
+
     if (!dstDotOp || !sharedEncoding.getHasLeadingOffset())
       return failure();
     RankedTensorType type = op.getType();

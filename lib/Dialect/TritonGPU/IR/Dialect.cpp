@@ -2047,7 +2047,13 @@ unsigned NvidiaMmaEncodingAttr::getTotalElemsPerThreadForOperand(
   int warpsPerCTAN = getWarpsPerCTA()[1];
   // H100
   if (isHopper()) {
-    return getTotalElemsPerThread(shape, eltTy);
+    assert(opIdx == 0);
+    auto instrMNK = getInstrShape();
+    int repM = ceil<unsigned>(shapePerCTA[0], instrMNK[0] * warpsPerCTAM);
+    int repK = ceil<unsigned>(shapePerCTA[1], instrMNK[2]);
+    // For each WGMMA instr, a 2x2 matrix fragment is loaded. Each thread holds
+    // kWidth elements for each quadrant. WGMMA is repeated repM * repK times.
+    return 4 * kWidth * repM * repK;
   }
   // A100
   if (isAmpere()) {

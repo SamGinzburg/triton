@@ -23,6 +23,7 @@
 
 #include "Utility.h"
 #include "mlir/Support/LLVM.h"
+#include <signal.h>
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -395,6 +396,7 @@ LogicalResult convertDot(const LLVMTypeConverter *typeConverter,
   DotOpMmaV3SmemLoader aLoader;
   SmallVector<Value> structA;
   if (aSharedLayout) {
+    //raise(SIGTRAP);
     aLoader =
         loadA(typeConverter, rewriter, loc, mmaEncoding, a, baseA, thread);
   } else {
