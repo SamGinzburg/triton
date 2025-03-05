@@ -209,6 +209,16 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
                                /*withScale=*/true, /*allowXF32=*/false);
 }
 
+FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::SparseDotOp dot,
+                                               int mfmaVersion, int nonKDim) {
+  RankedTensorType aType = dot.getA().getType();
+  bool allowXF32 = false;
+  return chooseMfmaInstruction(
+      mfmaVersion, dot.getC().getType(), aType.getElementType(),
+      dot.getB().getType().getElementType(), aType.getShape().back(), nonKDim,
+      /*withScale=*/false, allowXF32);
+}
+
 FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
                                                int mfmaVersion, int nonKDim,
                                                bool useFp16) {
@@ -906,6 +916,106 @@ public:
   }
 };
 
+class SparseBlockedToMFMA : public OpRewritePattern<tt::SparseDotOp> {
+  int mfmaVersion;
+  int nonKDim;
+  int kPack;
+
+public:
+  SparseBlockedToMFMA(MLIRContext *context, int mfmaVersion, int nonKDim,
+                      int kPack, PatternBenefit benefit = 1)
+      : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
+        nonKDim(nonKDim), kPack(kPack) {}
+
+  LogicalResult matchAndRewrite(tt::SparseDotOp dotOp,
+                                PatternRewriter &rewriter) const override {
+    RankedTensorType oldRetType = dotOp.getType();
+    if (!oldRetType.getEncoding() ||
+        !isa<ttg::BlockedEncodingAttr>(oldRetType.getEncoding()))
+      return failure();
+    if (!isa_and_nonnull<BlockedEncodingAttr>(dotOp.getType().getEncoding()))
+      return rewriter.notifyMatchFailure(
+          dotOp, "expected blocked encoding result tensor");
+
+    auto CTALayout = ttg::getCTALayout(oldRetType.getEncoding());
+
+    // get MFMA encoding for the given number of warps
+    auto retShape = oldRetType.getShape();
+    int numWarps = ttg::lookupNumWarps(dotOp);
+
+    // operands
+    Value a = dotOp.getA();
+    Value b = dotOp.getB();
+    Value aMeta = dotOp.getAMeta();
+
+    auto oldAType = cast<RankedTensorType>(a.getType());
+    auto oldBType = cast<RankedTensorType>(b.getType());
+    auto ctx = oldAType.getContext();
+
+    ttg::AMDMfmaEncodingAttr mfmaEnc;
+
+    auto mfmaInstr = chooseMfmaInstruction(dotOp, mfmaVersion, nonKDim);
+    if (failed(mfmaInstr))
+      return failure();
+    auto mDim = mfmaInstr->mDim;
+    auto nDim = mfmaInstr->nDim;
+    auto kDim = mfmaInstr->kDim;
+    auto kBase = mfmaInstr->kBase;
+
+    auto warpsPerTile =
+        warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
+
+    auto aElemTy = mfmaInstr->aElementType;
+    bool isTransposed = true;
+    mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
+        oldRetType.getContext(),
+        /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
+        /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
+
+    Type mfmaAccType;
+    if (oldRetType.getElementType().isIntOrIndex())
+      mfmaAccType = rewriter.getIntegerType(32);
+    else
+      mfmaAccType = rewriter.getF32Type();
+
+    // convert accumulator
+    auto oldAcc = dotOp.getC();
+    auto newAcc = convertAndCastTensor(rewriter, oldAcc, mfmaEnc, mfmaAccType);
+    auto kWidth = kBase;
+
+    // in mfma 4x4 case argument matrix groups in 16 groups
+    if (mDim == 4 && nDim == 4)
+      kWidth = kDim / 16;
+    if ((mDim == 4 && nDim == 64) || (mDim == 64 && nDim == 4))
+      kWidth = kDim;
+
+    // We want to extend kWidth by kPack (kPack=1 means no extension)
+    // to increase ds_read vector size
+    // However, in FA, the second dot can only use kWidth = kBase since it's
+    // limited by the result of the first dot, which is of mfmaLayout.
+    if (!isChainDotTail(dotOp))
+      kWidth *= kPack;
+
+    auto newAEncoding =
+        ttg::DotOperandEncodingAttr::get(ctx, 0, mfmaEnc, kWidth);
+    auto newBEncoding =
+        ttg::DotOperandEncodingAttr::get(ctx, 1, mfmaEnc, kWidth);
+    a = convertAndCastTensor(rewriter, a, newAEncoding,
+                             mfmaInstr->aElementType);
+    b = convertAndCastTensor(rewriter, b, newBEncoding,
+                             mfmaInstr->bElementType);
+    auto newDot = rewriter.create<tt::SparseDotOp>(
+        dotOp.getLoc(), newAcc.getType(), a, b, newAcc, aMeta);
+    Value dotOutput =
+        convertAndCastTensor(rewriter, newDot, oldRetType.getEncoding(),
+                             oldRetType.getElementType());
+
+    rewriter.replaceOp(dotOp, dotOutput);
+
+    return success();
+  }
+};
+
 static Value promoteOperand(OpBuilder &builder, Location loc, Value operand,
                             Type promotedType) {
   Type tensorPromotedType = cast<RankedTensorType>(operand.getType())
@@ -1244,9 +1354,10 @@ public:
     case ISAFamily::CDNA1:
     case ISAFamily::CDNA2:
     case ISAFamily::CDNA3:
-      patterns.add<::BlockedToMFMA, ::ScaledBlockedToMFMA>(
-          context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
-          /*benefit=*/2);
+      patterns
+          .add<::BlockedToMFMA, ::ScaledBlockedToMFMA, ::SparseBlockedToMFMA>(
+              context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
+              /*benefit=*/2);
       break;
     case ISAFamily::RDNA3:
       patterns.add<::BlockedToWMMA>(context, getWmmaVersion(archGenerationName),

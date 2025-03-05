@@ -1031,6 +1031,46 @@ V [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,
   let hasCustomAssemblyFormat = 1;
 }
 
+def AMDSparseMfmaEncodingAttr : DistributedEncoding<"AMDSparseMfmaEncoding", "amd_sparse_mfma_encoding", [MmaEncodingTrait]> {
+  let mnemonic = "amd_sparse_mfma";
+
+  let description = [{
+    An encoding for the sparse "A" input to the structured sparsity (e.g., 4:2) MFMA matrix core instructions,
+    available on AMD Instinct GPUs of CDNA architectures.
+
+    It is characterized by the following parameters:
+    - `versionMajor` and `versionMinor` indicates the GPU architecture:
+    - 3.0: gfx940, gfx941, gfx942: MI300
+    - 4.0: gfx950: MI350
+    - `warpsPerCTA` indicates the warp layout in the block.
+    - `MDim` and `NDim` indicate the dimension of the output of the mfma instruction.
+    - `isTransposed` indicates the result tensor is transposed so that it can be converted to dotOperand layout
+    without going to shared memory. This is used in the case of chained dot (E.g. Flash-Attention kernel).
+  }];
+
+  let parameters = (
+    ins
+    "unsigned": $versionMajor,
+    "unsigned": $versionMinor,
+    ArrayRefParameter<"unsigned">:$warpsPerCTA__,
+    "unsigned":$MDim,
+    "unsigned":$NDim,
+    "bool":$isTransposed,
+    "CTALayoutAttr":$CTALayout
+  );
+
+  let extraClassDeclaration = extraDistributedDeclaration # [{
+    SmallVector<unsigned> getSizePerThreadForOperand(int kWidth, int opIdx) const;
+    SmallVector<int64_t> getInstrShapeForOperand(int kWidth, int opIdx) const;
+    SmallVector<int64_t> getRepForOperand(ArrayRef<int64_t> operandShape, int kWidth, int opIdx) const;
+    SmallVector<unsigned> getRepOrderForOperand(int opIdx) const;
+    SmallVector<unsigned> getThreadsPerWarpForOperand(int opIdx) const;
+  }];
+
+  let genVerifyDecl = 1;
+  let hasCustomAssemblyFormat = 1;
+}
+
 def AMDWmmaEncodingAttr : DistributedEncoding<"AMDWmmaEncoding", "amd_wmma_encoding", [MmaEncodingTrait]> {
   let mnemonic = "amd_wmma";
 

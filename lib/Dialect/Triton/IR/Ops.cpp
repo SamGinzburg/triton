@@ -354,6 +354,13 @@ bool DotScaledOp::verifyOutputDims() {
   if (adim != oMdim || bdim != oNdim)
     return false;
   return true;
+
+//-- SparseDotOp --
+bool SparseDotOp::verifyDims() {
+  auto aShape = this->getA().getType().getShape();
+  auto bShape = this->getB().getType().getShape();
+  return aShape[aShape.size() - 1] * 2 == bShape[aShape.size() - 2];
+>>>>>>> ab7fc94b8 (initial WIP, layouts are still wrong + many other wrong things. compiles though.)
 }
 
 //-- MakeRangeOp --

@@ -1885,6 +1885,14 @@ def dot_scaled(lhs, lhs_scale, lhs_format, rhs, rhs_scale, rhs_format, acc=None,
                                rhs_k_pack, out_dtype, _builder)
 
 
+@builtin
+def sparse_dot(input, other, acc, input_meta, _builder=None):
+    """
+    TODO
+    """
+    return semantic.sparse_dot(input, other, acc, input_meta, _builder)
+
+
 # -----------------------
 # Non-Atomic Memory Operations
 # -----------------------

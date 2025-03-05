@@ -729,6 +729,20 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
   }
 };
 
+struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
+
+  SparseDotOpMFMAConversionHelper(AMDMfmaEncodingAttr mfmaLayout,
+                                  ConversionPatternRewriter &rewriter,
+                                  const LLVMTypeConverter *typeConverter,
+                                  Location loc)
+      : DotOpMFMAConversionHelper(mfmaLayout, rewriter, typeConverter, loc) {}
+
+  LogicalResult convertSparseDot(SparseDotOp op,
+                                 SparseDotOpAdaptor adaptor) const {
+    return success();
+  }
+};
+
 } // namespace
 
 namespace mlir::triton::AMD {
@@ -815,5 +829,36 @@ LogicalResult convertScaledMFMA(triton::DotScaledOp op,
                                          loc);
 
   return helper.convertScaledDot(op, adaptor);
+}
+
+LogicalResult convertSparseMFMA(triton::SparseDotOp op,
+                                triton::SparseDotOp::Adaptor adaptor,
+                                const LLVMTypeConverter *typeConverter,
+                                ConversionPatternRewriter &rewriter) {
+  auto rankedTType = [](Value tensor) {
+    return cast<RankedTensorType>(tensor.getType());
+  };
+
+  assert(isa<DotOperandEncodingAttr>(rankedTType(op.getA()).getEncoding()) &&
+         isa<DotOperandEncodingAttr>(rankedTType(op.getB()).getEncoding()) &&
+         "Both A and B should be DotOperand layout.");
+
+  auto cTensorTy = rankedTType(op.getC());
+  auto dTensorTy = rankedTType(op.getD());
+  assert(isa<AMDMfmaEncodingAttr>(cTensorTy.getEncoding()) &&
+         "Currently, we only support C with a mfma layout.");
+
+  assert(cTensorTy.getShape()[0] == dTensorTy.getShape()[0] &&
+         cTensorTy.getShape()[1] == dTensorTy.getShape()[1] &&
+         "DotOp's C operand should pass the same number of values as D.");
+
+  auto loc = op.getLoc();
+  auto mfmaLayout = cast<AMDMfmaEncodingAttr>(
+      cast<RankedTensorType>(op.getResult().getType()).getEncoding());
+
+  SparseDotOpMFMAConversionHelper helper(mfmaLayout, rewriter, typeConverter,
+                                         loc);
+
+  return helper.convertSparseDot(op, adaptor);
 }
 } // namespace mlir::triton::AMD
