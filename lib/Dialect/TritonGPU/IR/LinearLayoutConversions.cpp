@@ -628,33 +628,33 @@ AMDSparseMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   SmallVector<unsigned> order = getDefaultOrder();
   auto tileLayout = LinearLayout::empty();
 
-  // The 4:2 Sparse encoding is similar to the non-sparse one, except that
-  // it has half as many elements.
+  // The 2:4 Sparse encoding is similar to the non-sparse one, except that
+  // it has half as many elements (i.e., 2 elements out of 4 for the sparse A input)
 
   if (getMDim() == 32) {
     tileLayout = LinearLayout(
-        {{kRegister, {{0, 1}, {0, 2}, {0, 4}, /*gap*/ {0, 8}}},
-         {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, /*gap*/ {0, 4}}}},
+        {{kRegister, {{0, 1},  {0, 4}, /*gap*/ {0, 8}}},
+         {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, /*gap*/ {0, 2}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
     // For mfma.transposed layout, the element ownership among threads are
     // "transposed" within each warp.
     if (getIsTransposed())
       tileLayout = LinearLayout(
-          {{kRegister, {{1, 0}, {2, 0}, {4, 0}, /*gap*/ {8, 0}}},
-           {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, /*gap*/ {4, 0}}}},
+          {{kRegister, {{1, 0}, {4, 0}, /*gap*/ {8, 0}}},
+           {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, /*gap*/ {2, 0}}}},
           {outDimNames[order[0]], outDimNames[order[1]]});
   } else {
     assert(getMDim() == 16);
     tileLayout = LinearLayout(
-        {{kRegister, {{0, 1}, {0, 2}}},
-         {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, /*gap*/ {0, 4}, {0, 8}}}},
+      {{kRegister, {{0, 1}}},
+       {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, /*gap*/ {0, 2}, {0, 4}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
     // For mfma.transposed layout, the element ownership among threads are
     // "transposed" within each warp.
     if (getIsTransposed())
       tileLayout = LinearLayout(
-          {{kRegister, {{1, 0}, {2, 0}}},
-           {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, /*gap*/ {4, 0}, {8, 0}}}},
+        {{kRegister, {{1, 0}}},
+           {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, /*gap*/ {2, 0}, {4, 0}}}},
           {outDimNames[order[0]], outDimNames[order[1]]});
   }
   if (hasBatchDim) {
