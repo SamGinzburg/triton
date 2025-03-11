@@ -138,7 +138,7 @@ warpsPerTileWMMA(Operation *dotOp, ArrayRef<int64_t> shape, int numWarps) {
 FailureOr<MfmaIntrinsic>
 chooseMfmaInstruction(int mfmaVersion, RankedTensorType cType, Type aElemType,
                       Type bElemType, int inputKSize, int enforcedNonKDim,
-                      bool withScale, bool allowXF32) {
+                      bool withScale, bool isSparse, bool allowXF32) {
   // number of matrix elements along k dim per one MFMA instruction
   unsigned kDim = 0;
 
@@ -167,7 +167,7 @@ chooseMfmaInstruction(int mfmaVersion, RankedTensorType cType, Type aElemType,
 
   FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic =
       MfmaIntrinsic::selectFor(mfmaVersion, mDim, nDim, inputKSize, aElemType,
-                               bElemType, withScale, allowXF32);
+                               bElemType, withScale, isSparse, allowXF32);
   if (failed(maybeMfmaIntrinsic))
     llvm::report_fatal_error("No match found in MFMA database\n");
 
@@ -190,7 +190,7 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotOp dot, int mfmaVersion,
   return chooseMfmaInstruction(
       mfmaVersion, dot.getC().getType(), aType.getElementType(),
       dot.getB().getType().getElementType(), aType.getShape().back(), nonKDim,
-      withScale, allowXF32);
+      /*withScale=*/false, /*isSparse=*/false, allowXF32);
 }
 
 FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
@@ -206,17 +206,16 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   Type bElemType = scaleDotElemTypeToMLIRType(ctx, dot.getBElemType());
   return chooseMfmaInstruction(mfmaVersion, dot.getC().getType(), aElemType,
                                bElemType, inputKDim, nonKDim,
-                               /*withScale=*/true, /*allowXF32=*/false);
+                               /*withScale=*/true, /*isSparse=*/false, /*allowXF32=*/false);
 }
 
 FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::SparseDotOp dot,
                                                int mfmaVersion, int nonKDim) {
   RankedTensorType aType = dot.getA().getType();
-  bool allowXF32 = false;
   return chooseMfmaInstruction(
       mfmaVersion, dot.getC().getType(), aType.getElementType(),
       dot.getB().getType().getElementType(), aType.getShape().back(), nonKDim,
-      /*withScale=*/false, allowXF32);
+      /*withScale=*/false, /*isSparse=*/true, /*allowXF32=*/false);
 }
 
 FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
@@ -228,7 +227,7 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   return chooseMfmaInstruction(mfmaVersion, dot.getC().getType(), elemType,
                                elemType, dot.getA().getType().getShape().back(),
                                nonKDim,
-                               /*withScale=*/false, /*allowXF32=*/false);
+                               /*withScale=*/false, /*isSparse=*/false, /*allowXF32=*/false);
 }
 
 using OperandTypesVector = SmallVector<Type, 4>;

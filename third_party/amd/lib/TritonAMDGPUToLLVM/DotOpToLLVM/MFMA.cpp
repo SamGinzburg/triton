@@ -272,7 +272,7 @@ struct DotOpMFMAConversionHelper {
     StringRef intrinsicName;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
         mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB,
-        /*withScale=*/false, allowXF32);
+        /*withScale=*/false, /*isSparse=*/false, allowXF32);
     if (failed(maybeMfmaIntrinsic))
       llvm::report_fatal_error("No match found in MFMA database\n");
 
@@ -578,7 +578,7 @@ struct ScaledDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                                             : kDimOperandSize,
         scaleDotElemTypeToMLIRType(ctx, aElemType),
         scaleDotElemTypeToMLIRType(ctx, bElemType),
-        /*withScale=*/true, allowXF32);
+        /*withScale=*/true, /*isSparse=*/false, allowXF32);
     if (failed(maybeMfmaIntrinsic))
       llvm::report_fatal_error("No match found in MFMA database\n");
 
@@ -739,6 +739,127 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
   LogicalResult convertSparseDot(SparseDotOp op,
                                  SparseDotOpAdaptor adaptor) const {
+    auto tb = TritonLLVMOpBuilder(loc, rewriter);
+    // Check if this dot has come with priority set by setprio.
+    auto setPrioOp = dyn_cast_or_null<ROCDL::SetPrioOp>(op->getPrevNode());
+
+    auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+    auto mDim = mfmaLayout.getMDim();
+    auto nDim = mfmaLayout.getNDim();
+    auto mfmaVersion = mfmaLayout.getVersionMajor();
+
+    // TODO renable proper layout checks
+    //assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
+    //       (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
+
+    Value a = op.getA();
+    Value b = op.getB();
+    Value d = op.getD();
+    auto aTensorTy = cast<RankedTensorType>(a.getType());
+    auto bTensorTy = cast<RankedTensorType>(b.getType());
+    auto dTensorTy = cast<RankedTensorType>(d.getType());
+    auto elemTyA = aTensorTy.getElementType();
+    auto elemTyB = bTensorTy.getElementType();
+
+    const auto kDimOperandSize = aTensorTy.getShape().back();
+
+    StringRef intrinsicName;
+    FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
+        mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB,
+        /*withScale=*/false, /*isSparse*/true, /*allowXF32=*/false);
+    if (failed(maybeMfmaIntrinsic))
+      llvm::report_fatal_error("No match found in MFMA database\n");
+
+    intrinsicName = maybeMfmaIntrinsic->name;
+    unsigned kBase = maybeMfmaIntrinsic->kBase;
+
+    auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
+    auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
+    int kWidth = aEncoding.getKWidth();
+
+    const auto kDimInstrSize = mfmaLayout.getInstrShapeForOperand(kWidth, 0)[1];
+
+    auto repA = mfmaLayout.getRepForOperand(aTensorTy.getShape(), kWidth, 0);
+    auto repB = mfmaLayout.getRepForOperand(bTensorTy.getShape(), kWidth, 1);
+
+    // The sparse A input has exactly half as many elements as the B input
+    assert(repA[2] * 2 == repB[1]);
+
+    Value loadedA = adaptor.getA();
+    Value loadedB = adaptor.getB();
+    Value loadedC = adaptor.getC();
+
+    auto numRepM = repA[1];
+    auto numRepN = repB[2];
+    auto numRepK = repA[2];
+    auto numRepB = repA[0];
+    assert(repA[0] == repB[0]);
+
+    bool preserveBF16 = intrinsicName.contains(".bf16") && mfmaVersion >= 4;
+    auto operandA = getValuesFromDotOperandLayoutStruct(
+        loadedA, numRepB, numRepM, numRepK, kWidth, kBase,
+        aTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
+    auto operandB = getValuesFromDotOperandLayoutStruct(
+        loadedB, numRepB, numRepN, numRepK, kWidth, kBase,
+        aTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
+
+    auto dstElemTy = dTensorTy.getElementType();
+    auto fc = unpackLLElements(loc, loadedC, rewriter);
+
+    unsigned warpSize = triton::gpu::getWarpSize(mfmaLayout);
+    // compute number of output elements that each thread holds for one MFMA
+    // instruction.
+    const int subBlocks =
+        getNumSubmatrices(aTensorTy.getElementType(), mDim, nDim);
+    auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
+
+    Value firstMfma;
+    auto vecTy = vec_ty(dstElemTy, elemsPerVec);
+    for (int b = 0; b < numRepB; ++b) {
+      for (int m = 0; m < numRepM; ++m) {
+        for (int n = 0; n < numRepN; ++n) {
+          Value acc = tb.undef(vecTy);
+          for (unsigned v = 0; v < elemsPerVec; ++v) {
+            acc = tb.insert_element(
+                vecTy, acc,
+                fc[b * numRepM * numRepN * elemsPerVec +
+                   m * numRepN * elemsPerVec + n * elemsPerVec + v],
+                tb.i32_val(v));
+          }
+          acc = zeroAuxiliarBlocks(subBlocks, acc);
+          for (int k = 0; k < numRepK; k++) {
+            for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
+              acc = mfmaLayout.getIsTransposed()
+                        ? generateMFMAOp(intrinsicName,
+                                         operandB[kPack][{b, n, k}],
+                                         operandA[kPack][{b, m, k}], acc)
+                        : generateMFMAOp(intrinsicName,
+                                         operandA[kPack][{b, m, k}],
+                                         operandB[kPack][{b, n, k}], acc);
+              if (!firstMfma)
+                firstMfma = acc;
+            }
+          }
+          acc = reduceSubBlocks(subBlocks, acc);
+          adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
+                                kDimInstrSize, kDimOperandSize, elemsPerVec);
+        }
+      }
+    }
+
+    // Originally, setprio (high) is set to the high-level dot op. After dot is
+    // being lowered to the series of mfma operations, it should be moved next
+    // to the first mfma leaving the first mfma staying at the low priority. In
+    // this way, incoming warp can be effectively waiting on the first mfma
+    // instruction (low priority) while the other warp is executing mfma with
+    // high priority. Otherwise, incoming warp can break the cluster.
+    if (setPrioOp && firstMfma)
+      setPrioOp->moveAfter(firstMfma.getDefiningOp());
+
+    const size_t mmaCount =
+        numRepB * numRepM * numRepN * numRepK * kWidth / kBase;
+    packAndReplaceResult(op, fc, maybeMfmaIntrinsic, dstElemTy, elemTyA,
+                         mmaCount);
     return success();
   }
 };

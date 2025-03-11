@@ -25,7 +25,7 @@ using MfmaKey =
 // to query with "mismatches".
 MfmaKey composeMfmaKeyFor(unsigned version, unsigned mDim, unsigned nDim,
                           Type &aElemType, Type &bElemType, bool withScale,
-                          bool useTF32) {
+                          bool isSparse, bool useTF32) {
   Type aET = aElemType, bET = bElemType;
   Builder b(aElemType.getContext());
   if (withScale) {
@@ -272,10 +272,10 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 FailureOr<MfmaIntrinsic>
 MfmaIntrinsic::selectFor(int version, unsigned mDim, unsigned nDim,
                          unsigned inputKDim, Type aElemType, Type bElemType,
-                         bool withScale, bool useTF32) {
+                         bool withScale, bool isSparse, bool useTF32) {
   const MfmaMap &mfmaMap = MfmaDatabase::get(aElemType.getContext());
   MfmaKey key = composeMfmaKeyFor(version, mDim, nDim, aElemType, bElemType,
-                                  withScale, useTF32);
+                                  withScale, isSparse, useTF32);
 
   auto it = mfmaMap.find(key);
   if (it == mfmaMap.end())
