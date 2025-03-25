@@ -749,7 +749,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto mfmaVersion = mfmaLayout.getVersionMajor();
 
     // TODO renable proper layout checks
-    //assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
+    // assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
     //       (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
 
     Value a = op.getA();
@@ -766,7 +766,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     StringRef intrinsicName;
     FailureOr<MfmaIntrinsic> maybeMfmaIntrinsic = MfmaIntrinsic::selectFor(
         mfmaVersion, mDim, nDim, kDimOperandSize, elemTyA, elemTyB,
-        /*withScale=*/false, /*isSparse*/true, /*allowXF32=*/false);
+        /*withScale=*/false, /*isSparse*/ true, /*allowXF32=*/false);
     if (failed(maybeMfmaIntrinsic))
       llvm::report_fatal_error("No match found in MFMA database\n");
 
@@ -806,7 +806,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
 
-    unsigned warpSize = triton::gpu::getWarpSize(mfmaLayout);
+    unsigned warpSize = triton::gpu::lookupThreadsPerWarp(rewriter);
     // compute number of output elements that each thread holds for one MFMA
     // instruction.
     const int subBlocks =

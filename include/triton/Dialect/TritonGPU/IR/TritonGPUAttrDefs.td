@@ -1052,7 +1052,7 @@ def AMDSparseMfmaEncodingAttr : DistributedEncoding<"AMDSparseMfmaEncoding", "am
     ins
     "unsigned": $versionMajor,
     "unsigned": $versionMinor,
-    ArrayRefParameter<"unsigned">:$warpsPerCTA__,
+    ArrayRefParameter<"unsigned">:$warpsPerCTA,
     "unsigned":$MDim,
     "unsigned":$NDim,
     "bool":$isTransposed,

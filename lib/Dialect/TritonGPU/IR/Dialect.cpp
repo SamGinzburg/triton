@@ -1456,18 +1456,6 @@ Attribute AMDSparseMfmaEncodingAttr::parse(AsmParser &parser, Type type) {
       instrShape[0], instrShape[1], isTransposed, *CTALayout);
 }
 
-void AMDSparseMfmaEncodingAttr::print(AsmPrinter &printer) const {
-  printer << "<{"
-          << "versionMajor = " << getVersionMajor()                      //
-          << ", versionMinor = " << getVersionMinor()                    //
-          << ", warpsPerCTA = [" << ArrayRef(getWarpsPerCTA()) << "]"    //
-          << ", instrShape = [" << ArrayRef{getMDim(), getNDim()} << "]" //
-          << ", isTransposed = " << getIsTransposed();
-  maybePrintCTALayout(getContext(), printer, getCTALayout(),
-                      /*rank=*/getWarpsPerCTA().size());
-  printer << "}>";
-}
-
 LogicalResult AMDSparseMfmaEncodingAttr::verify(
     function_ref<mlir::InFlightDiagnostic()> emitError, unsigned versionMajor,
     unsigned versionMinor, llvm::ArrayRef<unsigned int> warpsPerCTA,
@@ -1794,9 +1782,11 @@ SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getCTAOrder() const {
 SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getCTASplitNum() const {
   return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
 }
+/*
 SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getWarpsPerCTA() const {
-  return SmallVector<unsigned>(getWarpsPerCTA__());
+  return SmallVector<unsigned>(getWarpsPerCTA());
 }
+
 SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getDefaultOrder() const {
   return getDefaultMmaOrder(*this);
 }
@@ -1809,6 +1799,7 @@ SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getDefaultThreadOrder() const {
     std::swap(order[0], order[1]);
   return order;
 }
+
 SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getThreadsPerWarp() const {
   unsigned rows, cols;
   auto rank = getDefaultOrder().size();
@@ -1853,6 +1844,7 @@ SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getSizePerThread() const {
   }
   return res;
 }
+*/
 
 SmallVector<int64_t>
 AMDSparseMfmaEncodingAttr::getInstrShapeForOperand(int kWidth,
@@ -1876,19 +1868,17 @@ AMDSparseMfmaEncodingAttr::getInstrShapeForOperand(int kWidth,
 }
 
 SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getRepOrder() const {
-  auto rank = getDefaultOrder().size();
-  return getMatrixOrder(rank, /*rowMajor*/ true);
+  return getMatrixOrder(getRank(), /*rowMajor*/ true);
 }
 
 SmallVector<unsigned>
 AMDSparseMfmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
-  auto rank = getDefaultOrder().size();
-  return getOrderForDotOperand(opIdx, rank, /*kContig*/ true);
+  return getOrderForDotOperand(opIdx, getRank(), /*kContig*/ true);
 }
 
 SmallVector<unsigned>
 AMDSparseMfmaEncodingAttr::getThreadsPerWarpForOperand(int opIdx) const {
-  auto rank = getDefaultOrder().size();
+  auto rank = getRank();
   SmallVector<unsigned> threads(rank, 1);
   unsigned kThreads;
   unsigned nonKThreads;
@@ -1953,6 +1943,19 @@ AMDSparseMfmaEncodingAttr::getSizePerThreadForOperand(int kWidth,
     llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
   }
   return sizePerThread;
+}
+
+
+void AMDSparseMfmaEncodingAttr::print(AsmPrinter &printer) const {
+  printer << "<{"
+          << "versionMajor = " << getVersionMajor()                      //
+          << ", versionMinor = " << getVersionMinor()                    //
+          << ", warpsPerCTA = [" << getWarpsPerCTA() << "]"              //
+          << ", instrShape = [" << ArrayRef{getMDim(), getNDim()} << "]" //
+          << ", isTransposed = " << getIsTransposed();
+  maybePrintCTALayout(getContext(), printer, getCTALayout(),
+                      /*rank=*/getRank());
+  printer << "}>";
 }
 
 //===----------------------------------------------------------------------===//

@@ -206,7 +206,8 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   Type bElemType = scaleDotElemTypeToMLIRType(ctx, dot.getBElemType());
   return chooseMfmaInstruction(mfmaVersion, dot.getC().getType(), aElemType,
                                bElemType, inputKDim, nonKDim,
-                               /*withScale=*/true, /*isSparse=*/false, /*allowXF32=*/false);
+                               /*withScale=*/true, /*isSparse=*/false,
+                               /*allowXF32=*/false);
 }
 
 FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::SparseDotOp dot,
@@ -224,10 +225,10 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
   // For scaled dot, we handle it with fp16 or bf16 emulation for now.
   Builder b(dot.getContext());
   Type elemType = useFp16 ? b.getF16Type() : b.getBF16Type();
-  return chooseMfmaInstruction(mfmaVersion, dot.getC().getType(), elemType,
-                               elemType, dot.getA().getType().getShape().back(),
-                               nonKDim,
-                               /*withScale=*/false, /*isSparse=*/false, /*allowXF32=*/false);
+  return chooseMfmaInstruction(
+      mfmaVersion, dot.getC().getType(), elemType, elemType,
+      dot.getA().getType().getShape().back(), nonKDim,
+      /*withScale=*/false, /*isSparse=*/false, /*allowXF32=*/false);
 }
 
 using OperandTypesVector = SmallVector<Type, 4>;

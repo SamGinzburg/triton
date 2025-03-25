@@ -603,7 +603,7 @@ LinearLayout chooseDotDsReadB64TrLayout(DotOperandEncodingAttr dotMfmaLayout,
 LinearLayout
 AMDSparseMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   int rank = shape.size();
-  assert(rank == getWarpsPerCTA().size());
+  assert(rank == getRank());
 
   bool hasBatchDim = rank == 3;
   int mIndex = 0 + hasBatchDim;
@@ -625,7 +625,7 @@ AMDSparseMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
 
   // We use the order from fastest varying to slowest varying. So each base
   // vector is a tuple of values mapping to matrix C's (N, M[, B]) indices.
-  SmallVector<unsigned> order = getDefaultOrder();
+  SmallVector<unsigned> order = getDefaultMmaOrder(*this);
   auto tileLayout = LinearLayout::empty();
 
   // The 2:4 Sparse encoding is similar to the non-sparse one, except that
@@ -669,7 +669,7 @@ AMDSparseMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   // And each warp takes the same register and lane sub-layout. So multiply with
   // an identity layout for the warp.
   LinearLayout warpLayout =
-      identityStandardND(S("warp"), getWarpsPerCTA(), order);
+    identityStandardND(S("warp"), getWarpsPerCTA(), order);
   LinearLayout ctaLayout = tileLayout * warpLayout;
 
   return combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
