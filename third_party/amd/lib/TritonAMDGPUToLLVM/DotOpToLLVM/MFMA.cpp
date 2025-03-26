@@ -35,6 +35,7 @@ namespace {
 using ::mlir::LLVM::AMD::scaleDotElemTypeToMLIRType;
 using ::mlir::LLVM::AMD::shuffleXor;
 using ::mlir::triton::gpu::AMDMfmaEncodingAttr;
+using ::mlir::triton::gpu::AMDSparseMfmaEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::LinearEncodingAttr;
 
@@ -738,19 +739,20 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       : DotOpMFMAConversionHelper(mfmaLayout, rewriter, typeConverter, loc) {}
 
   LogicalResult convertSparseDot(SparseDotOp op,
+                                 AMDSparseMfmaEncodingAttr sparseBMfmaLayout,
                                  SparseDotOpAdaptor adaptor) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     // Check if this dot has come with priority set by setprio.
     auto setPrioOp = dyn_cast_or_null<ROCDL::SetPrioOp>(op->getPrevNode());
 
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+
+    // A: [M, K], B: [K, N]
     auto mDim = mfmaLayout.getMDim();
-    auto nDim = mfmaLayout.getNDim();
+    auto nDim = sparseBMfmaLayout.getNDim();
     auto mfmaVersion = mfmaLayout.getVersionMajor();
 
-    // TODO renable proper layout checks
-    // assert((mDim == nDim && (mDim == 32 || mDim == 16 || mDim == 4)) ||
-    //       (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
+    assert((mDim == nDim && (mDim == 32 || mDim == 16)));
 
     Value a = op.getA();
     Value b = op.getB();
@@ -780,7 +782,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     const auto kDimInstrSize = mfmaLayout.getInstrShapeForOperand(kWidth, 0)[1];
 
     auto repA = mfmaLayout.getRepForOperand(aTensorTy.getShape(), kWidth, 0);
-    auto repB = mfmaLayout.getRepForOperand(bTensorTy.getShape(), kWidth, 1);
+    auto repB = sparseBMfmaLayout.getRepForOperand(bTensorTy.getShape(), kWidth, 1);
 
     // The sparse A input has exactly half as many elements as the B input
     assert(repA[2] * 2 == repB[1]);
@@ -964,8 +966,19 @@ LogicalResult convertSparseMFMA(triton::SparseDotOp op,
          isa<DotOperandEncodingAttr>(rankedTType(op.getB()).getEncoding()) &&
          "Both A and B should be DotOperand layout.");
 
+  // Get the parent layout
+  DotOperandEncodingAttr aTensorTy = cast<DotOperandEncodingAttr>(rankedTType(op.getA()).getEncoding());
+  DotOperandEncodingAttr bTensorTy = cast<DotOperandEncodingAttr>(rankedTType(op.getB()).getEncoding());
+
   auto cTensorTy = rankedTType(op.getC());
   auto dTensorTy = rankedTType(op.getD());
+
+  assert(isa<AMDMfmaEncodingAttr>(aTensorTy.getParent()) &&
+         "Currently, we only support A with an mfma layout.");
+
+  assert(isa<AMDSparseMfmaEncodingAttr>(bTensorTy.getParent()) &&
+         "Currently, we only support B with a sparse mfma layout.");
+
   assert(isa<AMDMfmaEncodingAttr>(cTensorTy.getEncoding()) &&
          "Currently, we only support C with a mfma layout.");
 
@@ -980,6 +993,6 @@ LogicalResult convertSparseMFMA(triton::SparseDotOp op,
   SparseDotOpMFMAConversionHelper helper(mfmaLayout, rewriter, typeConverter,
                                          loc);
 
-  return helper.convertSparseDot(op, adaptor);
+  return helper.convertSparseDot(op, cast<AMDSparseMfmaEncodingAttr>(bTensorTy.getParent()), adaptor);
 }
 } // namespace mlir::triton::AMD

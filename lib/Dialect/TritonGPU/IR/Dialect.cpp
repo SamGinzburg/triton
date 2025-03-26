@@ -1782,69 +1782,6 @@ SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getCTAOrder() const {
 SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getCTASplitNum() const {
   return SmallVector<unsigned>(getCTALayout().getCTASplitNum());
 }
-/*
-SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getWarpsPerCTA() const {
-  return SmallVector<unsigned>(getWarpsPerCTA());
-}
-
-SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getDefaultOrder() const {
-  return getDefaultMmaOrder(*this);
-}
-SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getDefaultWarpOrder() const {
-  return getDefaultOrder();
-}
-SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getDefaultThreadOrder() const {
-  auto order = getDefaultOrder();
-  if (getIsTransposed())
-    std::swap(order[0], order[1]);
-  return order;
-}
-
-SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getThreadsPerWarp() const {
-  unsigned rows, cols;
-  auto rank = getDefaultOrder().size();
-  SmallVector<unsigned> res(rank, 1);
-  if (getMDim() == 32) {
-    cols = 2;
-    rows = 32;
-  } else {
-    assert(getMDim() == 16);
-    cols = 4;
-    rows = 16;
-  }
-  if (getIsTransposed()) {
-    res[rank - 1] = cols;
-    res[rank - 2] = rows;
-  } else {
-    res[rank - 1] = rows;
-    res[rank - 2] = cols;
-  }
-  return res;
-}
-
-SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getSizePerThread() const {
-  unsigned rows, cols;
-  auto rank = getDefaultOrder().size();
-  SmallVector<unsigned> res(rank, 1);
-  if (getMDim() == 32) {
-    rows = 16;
-    cols = 1;
-  } else if (getMDim() == 16) {
-    rows = 4;
-    cols = 1;
-  } else
-    llvm_unreachable("Unexpected mfma non-k dim");
-
-  if (getIsTransposed()) {
-    res[rank - 1] = rows;
-    res[rank - 2] = cols;
-  } else {
-    res[rank - 1] = cols;
-    res[rank - 2] = rows;
-  }
-  return res;
-}
-*/
 
 SmallVector<int64_t>
 AMDSparseMfmaEncodingAttr::getInstrShapeForOperand(int kWidth,

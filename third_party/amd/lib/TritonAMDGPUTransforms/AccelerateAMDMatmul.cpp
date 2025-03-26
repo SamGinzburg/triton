@@ -952,6 +952,7 @@ public:
     auto oldBType = cast<RankedTensorType>(b.getType());
     auto ctx = oldAType.getContext();
 
+    ttg::AMDSparseMfmaEncodingAttr sparseMfmaEnc;
     ttg::AMDMfmaEncodingAttr mfmaEnc;
 
     auto mfmaInstr = chooseMfmaInstruction(dotOp, mfmaVersion, nonKDim);
@@ -971,6 +972,14 @@ public:
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
         /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
+
+    // The B input needs a different, sparse layout
+    // This is because it has half as many elements (i.e., 2:4)
+    sparseMfmaEnc = ttg::AMDSparseMfmaEncodingAttr::get(
+        oldRetType.getContext(),
+        /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
+        /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
+
 
     Type mfmaAccType;
     if (oldRetType.getElementType().isIntOrIndex())
@@ -999,7 +1008,7 @@ public:
     auto newAEncoding =
         ttg::DotOperandEncodingAttr::get(ctx, 0, mfmaEnc, kWidth);
     auto newBEncoding =
-        ttg::DotOperandEncodingAttr::get(ctx, 1, mfmaEnc, kWidth);
+        ttg::DotOperandEncodingAttr::get(ctx, 1, sparseMfmaEnc, kWidth);
     a = convertAndCastTensor(rewriter, a, newAEncoding,
                              mfmaInstr->aElementType);
     b = convertAndCastTensor(rewriter, b, newBEncoding,
