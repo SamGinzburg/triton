@@ -721,6 +721,13 @@ LogicalResult DotOperandEncodingAttr::verify(
     return success();
   }
 
+  if (auto parentAttr = mlir::dyn_cast<AMDSparseMfmaEncodingAttr>(parent)) {
+    if (kWidth == 0)
+      return emitError() << "ttg.dot_op kWidth parameter is mandatory for "
+                            "Sparse MFMA parent";
+    return success();
+  }
+
   if (auto parentAttr = mlir::dyn_cast<BlockedEncodingAttr>(parent)) {
     if (kWidth != 0)
       return emitError() << "ttg.dot_op kWidth parameter is not supported "
@@ -1788,20 +1795,22 @@ AMDSparseMfmaEncodingAttr::getInstrShapeForOperand(int kWidth,
                                                    int opIdx) const {
   unsigned mDim = getMDim();
   unsigned nDim = getNDim();
-  assert((mDim == nDim) && (mDim == 32 || mDim == 16 || mDim == 4) ||
-         (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
+
+  assert((mDim == nDim) && (mDim == 32 || mDim == 16));
+
   constexpr int warpSize = 64; // MFMA is always based on the 64-wide warps.
   int kGroups = -1;
   if (mDim == nDim)
     kGroups = warpSize / mDim;
-  if (mDim == 64 && nDim == 4 || mDim == 4 && nDim == 64)
-    kGroups = 1;
-  int64_t kDim = kWidth * kGroups;
-  if (opIdx == 0)
-    return {mDim, kDim};
-  else
-    assert(opIdx == 1);
-  return {kDim, nDim};
+  else {
+    assert("M and N dims should match for 2:4 sparse smfmac instructions");
+  }
+  // The K-dim is 2:4 sparse, so it has half as many elements
+  int64_t kDim = kWidth * kGroups / 2;
+
+  assert(opIdx == 0 && "Only the A-input to a sparse dot can be sparse");
+
+  return {mDim, kDim};
 }
 
 SmallVector<unsigned> AMDSparseMfmaEncodingAttr::getRepOrder() const {
@@ -1849,20 +1858,16 @@ AMDSparseMfmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> operandShape,
   auto warpsPerCTA = getWarpsPerCTA();
   int numRepBatch =
       rank == 3 ? std::max<int64_t>(1, operandShape[0] / warpsPerCTA[0]) : 1;
-  if (opIdx == 0)
-    return {
-        numRepBatch,
-        std::max<int64_t>(1, operandShape[rank - 2] /
-                                 (operandTileShape[0] * warpsPerCTA[rank - 2])),
-        std::max<int64_t>(1, operandShape[rank - 1] / operandTileShape[1])};
-  else {
-    assert(opIdx == 1);
-    return {
-        numRepBatch,
-        std::max<int64_t>(1, operandShape[rank - 2] / operandTileShape[0]),
-        std::max<int64_t>(1, operandShape[rank - 1] / (operandTileShape[1] *
-                                                       warpsPerCTA[rank - 1]))};
-  }
+
+  assert(opIdx == 0 && "Only the A-input to a sparse dot can be sparse");
+
+  return {
+      numRepBatch,
+      std::max<int64_t>(1, operandShape[rank - 2] /
+                                (operandTileShape[0] * warpsPerCTA[rank - 2])),
+      // The K-dim of the sparse A-input is half of the non-sparse B-input
+      std::max<int64_t>(1, operandShape[rank - 1] / operandTileShape[1] / 2)};
+
 }
 
 SmallVector<unsigned>
@@ -1870,15 +1875,12 @@ AMDSparseMfmaEncodingAttr::getSizePerThreadForOperand(int kWidth,
                                                       int opIdx) const {
   auto rank = getWarpsPerCTA().size();
   auto sizePerThread = SmallVector<unsigned>(rank, 1);
-  if (opIdx == 0) {
-    sizePerThread[rank - 2] = 1;
-    sizePerThread[rank - 1] = kWidth;
-  } else if (opIdx == 1) {
-    sizePerThread[rank - 2] = kWidth;
-    sizePerThread[rank - 1] = 1;
-  } else {
-    llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
-  }
+
+  assert(opIdx == 0 && "Only the A-input to a sparse dot can be sparse");
+
+  sizePerThread[rank - 2] = 1;
+  sizePerThread[rank - 1] = kWidth / 2;
+
   return sizePerThread;
 }
 

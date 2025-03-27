@@ -26,6 +26,7 @@
 #include "Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include <cstdio>
 
 using namespace mlir;
 using namespace mlir::triton;
@@ -739,7 +740,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       : DotOpMFMAConversionHelper(mfmaLayout, rewriter, typeConverter, loc) {}
 
   LogicalResult convertSparseDot(SparseDotOp op,
-                                 AMDSparseMfmaEncodingAttr sparseBMfmaLayout,
+                                 AMDSparseMfmaEncodingAttr sparseAMfmaLayout,
                                  SparseDotOpAdaptor adaptor) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     // Check if this dot has come with priority set by setprio.
@@ -748,8 +749,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto warpsPerCTA = mfmaLayout.getWarpsPerCTA();
 
     // A: [M, K], B: [K, N]
-    auto mDim = mfmaLayout.getMDim();
-    auto nDim = sparseBMfmaLayout.getNDim();
+    auto mDim = sparseAMfmaLayout.getMDim();
+    auto nDim = mfmaLayout.getNDim();
     auto mfmaVersion = mfmaLayout.getVersionMajor();
 
     assert((mDim == nDim && (mDim == 32 || mDim == 16)));
@@ -777,15 +778,17 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
     auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
-    int kWidth = aEncoding.getKWidth();
+
+    int kWidthSparse = aEncoding.getKWidth();
+    int kWidth = bEncoding.getKWidth();
 
     const auto kDimInstrSize = mfmaLayout.getInstrShapeForOperand(kWidth, 0)[1];
 
-    auto repA = mfmaLayout.getRepForOperand(aTensorTy.getShape(), kWidth, 0);
-    auto repB = sparseBMfmaLayout.getRepForOperand(bTensorTy.getShape(), kWidth, 1);
+    auto repA = sparseAMfmaLayout.getRepForOperand(aTensorTy.getShape(), kWidthSparse, 0);
+    auto repB = mfmaLayout.getRepForOperand(bTensorTy.getShape(), kWidth, 1);
 
-    // The sparse A input has exactly half as many elements as the B input
-    assert(repA[2] * 2 == repB[1]);
+    // K-Dim comparison
+    assert(repA[2] == repB[1]);
 
     Value loadedA = adaptor.getA();
     Value loadedB = adaptor.getB();
@@ -793,16 +796,18 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     auto numRepM = repA[1];
     auto numRepN = repB[2];
-    auto numRepK = repA[2];
+    // The Sparse A-input has half as many elements on the K-dim as the B-input
+    auto numRepAK = repA[2];
+    auto numRepBK = repB[1];
     auto numRepB = repA[0];
     assert(repA[0] == repB[0]);
 
     bool preserveBF16 = intrinsicName.contains(".bf16") && mfmaVersion >= 4;
     auto operandA = getValuesFromDotOperandLayoutStruct(
-        loadedA, numRepB, numRepM, numRepK, kWidth, kBase,
+        loadedA, numRepB, numRepM, numRepAK, kWidthSparse, kBase,
         aTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
     auto operandB = getValuesFromDotOperandLayoutStruct(
-        loadedB, numRepB, numRepN, numRepK, kWidth, kBase,
+        loadedB, numRepB, numRepN, numRepBK, kWidth, kBase,
         aTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
 
     auto dstElemTy = dTensorTy.getElementType();
@@ -829,19 +834,23 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                 tb.i32_val(v));
           }
           acc = zeroAuxiliarBlocks(subBlocks, acc);
-          for (int k = 0; k < numRepK; k++) {
+
+          for (int k = 0; k < numRepBK; k++) {
             for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
+              printf("K: %d\n", k);
+              printf("kPack: %d\n", kPack);
               acc = mfmaLayout.getIsTransposed()
                         ? generateMFMAOp(intrinsicName,
                                          operandB[kPack][{b, n, k}],
-                                         operandA[kPack][{b, m, k}], acc)
+                                         operandA[kPack][{b, m, k / 2}], acc)
                         : generateMFMAOp(intrinsicName,
-                                         operandA[kPack][{b, m, k}],
+                                         operandA[kPack][{b, m, k / 2}],
                                          operandB[kPack][{b, n, k}], acc);
               if (!firstMfma)
                 firstMfma = acc;
             }
           }
+
           acc = reduceSubBlocks(subBlocks, acc);
           adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
                                 kDimInstrSize, kDimOperandSize, elemsPerVec);
@@ -859,7 +868,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       setPrioOp->moveAfter(firstMfma.getDefiningOp());
 
     const size_t mmaCount =
-        numRepB * numRepM * numRepN * numRepK * kWidth / kBase;
+        numRepB * numRepM * numRepN * numRepBK * kWidth / kBase;
     packAndReplaceResult(op, fc, maybeMfmaIntrinsic, dstElemTy, elemTyA,
                          mmaCount);
     return success();
@@ -973,11 +982,11 @@ LogicalResult convertSparseMFMA(triton::SparseDotOp op,
   auto cTensorTy = rankedTType(op.getC());
   auto dTensorTy = rankedTType(op.getD());
 
-  assert(isa<AMDMfmaEncodingAttr>(aTensorTy.getParent()) &&
-         "Currently, we only support A with an mfma layout.");
+  assert(isa<AMDMfmaEncodingAttr>(bTensorTy.getParent()) &&
+         "Currently, we only support B with an mfma layout.");
 
-  assert(isa<AMDSparseMfmaEncodingAttr>(bTensorTy.getParent()) &&
-         "Currently, we only support B with a sparse mfma layout.");
+  assert(isa<AMDSparseMfmaEncodingAttr>(aTensorTy.getParent()) &&
+         "Currently, we only support A with a sparse mfma layout.");
 
   assert(isa<AMDMfmaEncodingAttr>(cTensorTy.getEncoding()) &&
          "Currently, we only support C with a mfma layout.");
@@ -993,6 +1002,6 @@ LogicalResult convertSparseMFMA(triton::SparseDotOp op,
   SparseDotOpMFMAConversionHelper helper(mfmaLayout, rewriter, typeConverter,
                                          loc);
 
-  return helper.convertSparseDot(op, cast<AMDSparseMfmaEncodingAttr>(bTensorTy.getParent()), adaptor);
+  return helper.convertSparseDot(op, cast<AMDSparseMfmaEncodingAttr>(aTensorTy.getParent()), adaptor);
 }
 } // namespace mlir::triton::AMD

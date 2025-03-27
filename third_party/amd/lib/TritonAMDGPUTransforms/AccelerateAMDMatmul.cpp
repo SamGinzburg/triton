@@ -973,8 +973,8 @@ public:
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
         /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
 
-    // The B input needs a different, sparse layout
-    // This is because it has half as many elements (i.e., 2:4)
+    // The A input needs a different, sparse layout
+    // This is because it has half as many elements on the k-dim (i.e., 2:4)
     sparseMfmaEnc = ttg::AMDSparseMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
@@ -992,12 +992,6 @@ public:
     auto newAcc = convertAndCastTensor(rewriter, oldAcc, mfmaEnc, mfmaAccType);
     auto kWidth = kBase;
 
-    // in mfma 4x4 case argument matrix groups in 16 groups
-    if (mDim == 4 && nDim == 4)
-      kWidth = kDim / 16;
-    if ((mDim == 4 && nDim == 64) || (mDim == 64 && nDim == 4))
-      kWidth = kDim;
-
     // We want to extend kWidth by kPack (kPack=1 means no extension)
     // to increase ds_read vector size
     // However, in FA, the second dot can only use kWidth = kBase since it's
@@ -1005,10 +999,11 @@ public:
     if (!isChainDotTail(dotOp))
       kWidth *= kPack;
 
+    // The A input has half the K-dim of the B-input for 2:4 smfmac instructions
     auto newAEncoding =
-        ttg::DotOperandEncodingAttr::get(ctx, 0, mfmaEnc, kWidth);
+        ttg::DotOperandEncodingAttr::get(ctx, 0, sparseMfmaEnc, kWidth);
     auto newBEncoding =
-        ttg::DotOperandEncodingAttr::get(ctx, 1, sparseMfmaEnc, kWidth);
+        ttg::DotOperandEncodingAttr::get(ctx, 1, mfmaEnc, kWidth);
     a = convertAndCastTensor(rewriter, a, newAEncoding,
                              mfmaInstr->aElementType);
     b = convertAndCastTensor(rewriter, b, newBEncoding,
