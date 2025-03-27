@@ -14,11 +14,10 @@ namespace {
 // Enum to represent supported Dot types (to avoid collisions)
 enum class MfmaKeyDotType { STANDARD, SCALED, SPARSE };
 
-
 // The tuple used as key to query MFMA intrinsic map.
-using MfmaKey =
-    std::tuple<unsigned /*version*/, unsigned /*mDim*/, unsigned /*nDim*/,
-               TypeID /*aElemType*/, TypeID /*bElemType*/, MfmaKeyDotType /*dotType*/>;
+using MfmaKey = std::tuple<unsigned /*version*/, unsigned /*mDim*/,
+                           unsigned /*nDim*/, TypeID /*aElemType*/,
+                           TypeID /*bElemType*/, MfmaKeyDotType /*dotType*/>;
 
 // Returns a key for querying an MFMA intrinsic for the given parameters.
 // Updates the passed-in A/B element type to the chosen MFMA intrinsic's A/B
@@ -83,32 +82,39 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 // Macro for defining MFMA intrinsics at a specific gfx version.
 #define TRITON_MFMA_v(v, m, n, aET, bET, symbol, k, kBase)                     \
   {                                                                            \
-    /*key=*/{v, m, n, aET.getTypeID(), bET.getTypeID(), MfmaKeyDotType::STANDARD}, /*value=*/{           \
+    /*key=*/{                                                                  \
+        v, m, n, aET.getTypeID(), bET.getTypeID(), MfmaKeyDotType::STANDARD},  \
+    /*value=*/{                                                                \
       {ROCDL::symbol::getOperationName(), k, kBase},                           \
     }                                                                          \
   }
 
-#define TRITON_MFMA_SCALE_v(v, m, n, aET, bET, symbol, k, kBase)                     \
+#define TRITON_MFMA_SCALE_v(v, m, n, aET, bET, symbol, k, kBase)               \
   {                                                                            \
-    /*key=*/{v, m, n, aET.getTypeID(), bET.getTypeID(), MfmaKeyDotType::SCALED}, /*value=*/{           \
+    /*key=*/{                                                                  \
+        v, m, n, aET.getTypeID(), bET.getTypeID(), MfmaKeyDotType::SCALED},    \
+    /*value=*/{                                                                \
       {ROCDL::symbol::getOperationName(), k, kBase},                           \
     }                                                                          \
   }
 
-#define TRITON_MFMA_SPARSE_v(v, m, n, aET, bET, symbol, k, kBase)                     \
+#define TRITON_MFMA_SPARSE_v(v, m, n, aET, bET, symbol, k, kBase)              \
   {                                                                            \
-    /*key=*/{v, m, n, aET.getTypeID(), bET.getTypeID(), MfmaKeyDotType::SPARSE}, /*value=*/{           \
+    /*key=*/{                                                                  \
+        v, m, n, aET.getTypeID(), bET.getTypeID(), MfmaKeyDotType::SPARSE},    \
+    /*value=*/{                                                                \
       {ROCDL::symbol::getOperationName(), k, kBase},                           \
     }                                                                          \
   }
-
 
 // For certain architectures, we can have two intrinsics with the same M/N but
 // different K. Order matters here: case1 will be preferred to case2.
 #define TRITON_MFMA_v_2case(v, m, n, aET, bET, symbol1, k1, kBase1, symbol2,   \
                             k2, kBase2)                                        \
   {                                                                            \
-    /*key=*/{v, m, n, aET.getTypeID(), bET.getTypeID(), MfmaKeyDotType::STANDARD}, /*value=*/{           \
+    /*key=*/{                                                                  \
+        v, m, n, aET.getTypeID(), bET.getTypeID(), MfmaKeyDotType::STANDARD},  \
+    /*value=*/{                                                                \
       {ROCDL::symbol1::getOperationName(), k1, kBase1},                        \
           {ROCDL::symbol2::getOperationName(), k2, kBase2},                    \
     }                                                                          \
@@ -282,18 +288,22 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 
       // Scaled mfma f8f6f4
       // mfma_scale_F32_16x16x128_F8F6F4
-      TRITON_MFMA_SCALE_v(4, 16, 16, fp4T, fp4T, mfma_scale_f32_16x16x128_f8f6f4, 128,
-                    32),
+      TRITON_MFMA_SCALE_v(4, 16, 16, fp4T, fp4T,
+                          mfma_scale_f32_16x16x128_f8f6f4, 128, 32),
       // mfma_scale_F32_32x32x64_F8F6F4
-      TRITON_MFMA_SCALE_v(4, 32, 32, fp4T, fp4T, mfma_scale_f32_32x32x64_f8f6f4, 64,
-                    32),
+      TRITON_MFMA_SCALE_v(4, 32, 32, fp4T, fp4T, mfma_scale_f32_32x32x64_f8f6f4,
+                          64, 32),
 
       // smfmac 2:4 Sparsity MFMA instructions
       // CDNA3-only for now
-      TRITON_MFMA_SPARSE_v(3, 32, 32, f16T, f16T, smfmac_f32_32x32x16_bf16, 16, 4),
-      TRITON_MFMA_SPARSE_v(3, 16, 16, f16T, f16T, smfmac_f32_16x16x32_bf16, 32, 4),
-      TRITON_MFMA_SPARSE_v(3, 32, 32, bf16T, bf16T, smfmac_f32_32x32x16_bf16, 16, 4),
-      TRITON_MFMA_SPARSE_v(3, 16, 16, bf16T, bf16T, smfmac_f32_16x16x32_bf16, 32, 4),
+      TRITON_MFMA_SPARSE_v(3, 32, 32, f16T, f16T, smfmac_f32_32x32x16_bf16, 16,
+                           4),
+      TRITON_MFMA_SPARSE_v(3, 16, 16, f16T, f16T, smfmac_f32_16x16x32_bf16, 32,
+                           4),
+      TRITON_MFMA_SPARSE_v(3, 32, 32, bf16T, bf16T, smfmac_f32_32x32x16_bf16,
+                           16, 4),
+      TRITON_MFMA_SPARSE_v(3, 16, 16, bf16T, bf16T, smfmac_f32_16x16x32_bf16,
+                           32, 4),
   };
 }
 

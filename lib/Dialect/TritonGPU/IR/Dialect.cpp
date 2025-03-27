@@ -1864,10 +1864,9 @@ AMDSparseMfmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> operandShape,
   return {
       numRepBatch,
       std::max<int64_t>(1, operandShape[rank - 2] /
-                                (operandTileShape[0] * warpsPerCTA[rank - 2])),
+                               (operandTileShape[0] * warpsPerCTA[rank - 2])),
       // The K-dim of the sparse A-input is half of the non-sparse B-input
       std::max<int64_t>(1, operandShape[rank - 1] / operandTileShape[1] / 2)};
-
 }
 
 SmallVector<unsigned>
@@ -1883,7 +1882,6 @@ AMDSparseMfmaEncodingAttr::getSizePerThreadForOperand(int kWidth,
 
   return sizePerThread;
 }
-
 
 void AMDSparseMfmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"

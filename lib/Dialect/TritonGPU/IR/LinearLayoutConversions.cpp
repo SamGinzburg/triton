@@ -669,7 +669,7 @@ AMDSparseMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   // And each warp takes the same register and lane sub-layout. So multiply with
   // an identity layout for the warp.
   LinearLayout warpLayout =
-    identityStandardND(S("warp"), getWarpsPerCTA(), order);
+      identityStandardND(S("warp"), getWarpsPerCTA(), order);
   LinearLayout ctaLayout = tileLayout * warpLayout;
 
   return combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
@@ -823,7 +823,7 @@ LinearLayout chooseDotDsReadB64Tr16Layout(DotOperandEncodingAttr dotMfmaLayout,
 }
 
 LinearLayout sparseMfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
-                                   ArrayRef<int64_t> shape) {
+                                         ArrayRef<int64_t> shape) {
 
   // Current linear layout conversion for dot operand is only necessary to
   // enable LDS bypass for operand B in the MFMA dot path. To achieve
@@ -849,7 +849,8 @@ LinearLayout sparseMfmaDotToLinearLayout(DotOperandEncodingAttr dotMfmaLayout,
   //
   // Other use of Linear layout is a support of rare corner cases,
   // for example one instruction tile is larger than tensor
-  auto mfmaLayout = llvm::cast<AMDSparseMfmaEncodingAttr>(dotMfmaLayout.getParent());
+  auto mfmaLayout =
+      llvm::cast<AMDSparseMfmaEncodingAttr>(dotMfmaLayout.getParent());
 
   auto rank = shape.size();
   bool hasBatchDim = rank == 3;
@@ -1365,7 +1366,8 @@ DotOperandEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
     return fmaDotToLinearLayout(*this, shape);
   } else if (auto mfmaLayout = mlir::dyn_cast<AMDMfmaEncodingAttr>(parent)) {
     return mfmaDotToLinearLayout(*this, shape);
-  } else if (auto mfmaLayout = mlir::dyn_cast<AMDSparseMfmaEncodingAttr>(parent)) {
+  } else if (auto mfmaLayout =
+                 mlir::dyn_cast<AMDSparseMfmaEncodingAttr>(parent)) {
     return sparseMfmaDotToLinearLayout(*this, shape);
   } else if (auto wmmaLayout = mlir::dyn_cast<AMDWmmaEncodingAttr>(parent)) {
     return wmmaDotOperandToLinearLayout(*this, shape);
