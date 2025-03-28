@@ -950,8 +950,10 @@ public:
 
     auto oldAType = cast<RankedTensorType>(a.getType());
     auto oldBType = cast<RankedTensorType>(b.getType());
+    auto aMetaType = cast<RankedTensorType>(aMeta.getType());
     auto ctx = oldAType.getContext();
 
+    ttg::AMDCompressionMfmaEncodingAttr compressionMfmaEnc;
     ttg::AMDSparseMfmaEncodingAttr sparseMfmaEnc;
     ttg::AMDMfmaEncodingAttr mfmaEnc;
 
@@ -979,6 +981,14 @@ public:
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
         /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
+
+    // The layout for aMeta
+    compressionMfmaEnc = ttg::AMDCompressionMfmaEncodingAttr::get(
+        oldRetType.getContext(),
+        /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
+        /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
+
+
 
     Type mfmaAccType;
     if (oldRetType.getElementType().isIntOrIndex())
@@ -1008,6 +1018,8 @@ public:
                              mfmaInstr->aElementType);
     b = convertAndCastTensor(rewriter, b, newBEncoding,
                              mfmaInstr->bElementType);
+    aMeta = convertAndCastTensor(rewriter, aMeta, compressionMfmaEnc, aMetaType.getElementType());
+
     auto newDot = rewriter.create<tt::SparseDotOp>(
         dotOp.getLoc(), newAcc.getType(), a, b, newAcc, aMeta);
     Value dotOutput =

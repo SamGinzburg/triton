@@ -747,6 +747,21 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                                   Location loc)
       : DotOpMFMAConversionHelper(mfmaLayout, rewriter, typeConverter, loc) {}
 
+  Value generateSparseMFMAOp(StringRef intrinsicName,
+                             Value valA,
+                             Value valB,
+                             Value valC,
+                             Value regIdx,
+                             Value abid) const {
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    auto resType = valC.getType();
+    Value zeroFlag = b.i32_val(0);
+    OperationState loweredOp(loc, intrinsicName);
+    loweredOp.addTypes(resType);
+    loweredOp.addOperands({valA, valB, valC, zeroFlag, zeroFlag, zeroFlag});
+    return rewriter.create(loweredOp)->getResult(0);
+  }
+
   LogicalResult convertSparseDot(SparseDotOp op,
                                  AMDSparseMfmaEncodingAttr sparseAMfmaLayout,
                                  SparseDotOpAdaptor adaptor) const {
@@ -766,6 +781,9 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     Value a = op.getA();
     Value b = op.getB();
     Value d = op.getD();
+    // aMeta
+    Value aMeta = op.getAMeta();
+
     auto aTensorTy = cast<RankedTensorType>(a.getType());
     auto bTensorTy = cast<RankedTensorType>(b.getType());
     auto dTensorTy = cast<RankedTensorType>(d.getType());
@@ -805,6 +823,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     Value loadedA = adaptor.getA();
     Value loadedB = adaptor.getB();
     Value loadedC = adaptor.getC();
+
+    Value loadedAMeta = adaptor.getAMeta();
 
     auto numRepM = repA[1];
     auto numRepN = repB[2];
@@ -873,8 +893,10 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               //                    reg_idx, <-- aMeta, all the indicies are in
               //                    one VGPR 0, abid);   <--
 
-              acc = generateMFMAOp(intrinsicName, operandA[kPack][{b, m, k}],
-                                   operandB[kPack][{b, n, k}], acc);
+              acc = generateMFMAOp(intrinsicName,
+                                         operandA[kPack][{b, m, k}],
+                                         operandB[kPack][{b, n, k}],
+                                         acc);
 
               if (!firstMfma)
                 firstMfma = acc;

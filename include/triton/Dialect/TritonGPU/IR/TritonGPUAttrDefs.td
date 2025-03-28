@@ -1071,6 +1071,33 @@ def AMDSparseMfmaEncodingAttr : DistributedEncoding<"AMDSparseMfmaEncoding", "am
   let hasCustomAssemblyFormat = 1;
 }
 
+def AMDCompressionMfmaEncodingAttr : DistributedEncoding<"AMDCompressionMfmaEncoding", "amd_compression_mfma_encoding", []> {
+  let mnemonic = "amd_compression_mfma";
+
+  let description = [{
+    This is an encoding of the "compression"-matrix input for smfmac instructions. It is the metadata that
+    describes which 2 out of 4 elements in the sparse A-input are sparse. It is indexed into with the abid operand and
+    has shape [M, K / 4] as there is one element for every 2 elements in the sparse A input on the K-dim.
+  }];
+
+  let parameters = (
+    ins
+    "unsigned": $versionMajor,
+    "unsigned": $versionMinor,
+    ArrayRefParameter<"unsigned">:$warpsPerCTA,
+    "unsigned":$MDim,
+    "unsigned":$NDim,
+    "bool":$isTransposed,
+    "CTALayoutAttr":$CTALayout
+  );
+
+  let extraClassDeclaration = extraDistributedDeclaration # [{
+  }];
+
+  let genVerifyDecl = 1;
+  let hasCustomAssemblyFormat = 1;
+}
+
 def AMDWmmaEncodingAttr : DistributedEncoding<"AMDWmmaEncoding", "amd_wmma_encoding", [MmaEncodingTrait]> {
   let mnemonic = "amd_wmma";
 

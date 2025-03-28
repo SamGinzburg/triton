@@ -675,6 +675,79 @@ AMDSparseMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   return combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
 }
 
+LinearLayout
+AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
+  int rank = shape.size();
+  assert(rank == getRank());
+
+  bool hasBatchDim = rank == 3;
+  int mIndex = 0 + hasBatchDim;
+  int nIndex = 1 + hasBatchDim;
+  (void)mIndex, (void)nIndex;
+
+  assert(((getMDim() == 32 && getNDim() == 32) ||
+          (getMDim() == 16 && getNDim() == 16)) &&
+         "Unsupported mfma type");
+
+  MLIRContext *ctx = getContext();
+  SmallVector<StringAttr> outDimNames = standardOutDimNames(ctx, rank);
+
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+
+  // https://github.com/ROCm/amd_matrix_instruction_calculator can print the
+  // register and lane layout for mfma instructions.
+
+  // We use the order from fastest varying to slowest varying. So each base
+  // vector is a tuple of values mapping to matrix C's (N, M[, B]) indices.
+  // TODO: we only support row-major aMeta for now
+  SmallVector<unsigned> order = {1, 0};
+    //getDefaultMmaOrder(*this);
+  auto tileLayout = LinearLayout::empty();
+
+  //   Matrix element to register mapping with no modifiers:
+  //    A[i][k].block GPR: (floor(k / 4) % 2)
+  //    A[i][k].block Lane: 32 * floor(k / 8) + i
+  //    compression[i][k] GPR: 0.[4*(floor(k / 4) % 2)+3 : 4*(floor(k / 4) % 2)]
+  //    compression[i][k] Lane: 32 * floor(k / 8) + i
+  //    B[k][j].block GPR: (k % 4).[16*(k % 2)+15 : 16*(k % 2)]
+  //    B[k][j].block Lane: 32 * floor(k / 8) + j
+  //    D[i][j].block GPR: 4 * floor(i / 8) + (i % 4)
+
+  // So the compression matrix has the same lane configuration as the sparse A input
+  // The difference is that there is only 1 register, which is represented in Va.c format
+
+  // We don't need to support transposed layouts because we can't transpose sparse MFMA ops.
+  // This is because only the A input can be sparse.
+  if (getMDim() == 32) {
+    tileLayout = LinearLayout(
+        {{kRegister, {{0, 1}, /*gap*/ {0, 8}}},
+         {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, /*gap*/ {0, 2}}}},
+        {outDimNames[order[0]], outDimNames[order[1]]});
+  } else {
+    assert(getMDim() == 16);
+    tileLayout = LinearLayout(
+        {{kRegister, {{0, 1}}},
+         {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, /*gap*/ {0, 2}, {0, 4}}}},
+        {outDimNames[order[0]], outDimNames[order[1]]});
+  }
+  if (hasBatchDim) {
+    assert(order[2] == 0);
+    // Extend the base vector with one value to accommodate for the batch
+    // dimension, which appears at the last.
+    tileLayout *= LinearLayout::identity1D(1, kRegister, outDimNames[order[2]]);
+    tileLayout *= LinearLayout::identity1D(1, kLane, outDimNames[order[2]]);
+  }
+
+  // And each warp takes the same register and lane sub-layout. So multiply with
+  // an identity layout for the warp.
+  LinearLayout warpLayout =
+      identityStandardND(S("warp"), getWarpsPerCTA(), order);
+  LinearLayout ctaLayout = tileLayout * warpLayout;
+
+  return combineCtaCgaWithShape(ctaLayout, getCTALayout(), shape);
+}
+
 LinearLayout chooseDotDsReadB64Tr16Layout(DotOperandEncodingAttr dotMfmaLayout,
                                           ArrayRef<int64_t> shape,
                                           int32_t elemBitWidth) {
