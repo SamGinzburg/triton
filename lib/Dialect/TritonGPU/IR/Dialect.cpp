@@ -1806,7 +1806,8 @@ AMDSparseMfmaEncodingAttr::getInstrShapeForOperand(int kWidth,
     assert("M and N dims should match for 2:4 sparse smfmac instructions");
   }
   // The K-dim is 2:4 sparse, so it has half as many elements
-  int64_t kDim = kWidth * kGroups / 2;
+  // kWidth has already been adjusted
+  int64_t kDim = kWidth * kGroups;
 
   assert(opIdx == 0 && "Only the A-input to a sparse dot can be sparse");
 
@@ -1853,20 +1854,19 @@ AMDSparseMfmaEncodingAttr::getThreadsPerWarpForOperand(int opIdx) const {
 SmallVector<int64_t>
 AMDSparseMfmaEncodingAttr::getRepForOperand(ArrayRef<int64_t> operandShape,
                                             int kWidth, int opIdx) const {
+  assert(opIdx == 0 && "Only the A-input to a sparse dot can be sparse");
+
   auto operandTileShape = getInstrShapeForOperand(kWidth, opIdx);
   auto rank = operandShape.size();
   auto warpsPerCTA = getWarpsPerCTA();
   int numRepBatch =
       rank == 3 ? std::max<int64_t>(1, operandShape[0] / warpsPerCTA[0]) : 1;
 
-  assert(opIdx == 0 && "Only the A-input to a sparse dot can be sparse");
-
   return {
       numRepBatch,
       std::max<int64_t>(1, operandShape[rank - 2] /
                                (operandTileShape[0] * warpsPerCTA[rank - 2])),
-      // The K-dim of the sparse A-input is half of the non-sparse B-input
-      std::max<int64_t>(1, operandShape[rank - 1] / operandTileShape[1] / 2)};
+      std::max<int64_t>(1, operandShape[rank - 1] / operandTileShape[1])};
 }
 
 SmallVector<unsigned>
@@ -1878,7 +1878,7 @@ AMDSparseMfmaEncodingAttr::getSizePerThreadForOperand(int kWidth,
   assert(opIdx == 0 && "Only the A-input to a sparse dot can be sparse");
 
   sizePerThread[rank - 2] = 1;
-  sizePerThread[rank - 1] = kWidth / 2;
+  sizePerThread[rank - 1] = kWidth;
 
   return sizePerThread;
 }

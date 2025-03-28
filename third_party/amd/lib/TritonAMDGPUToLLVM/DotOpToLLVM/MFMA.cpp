@@ -394,6 +394,7 @@ struct DotOpMFMAConversionHelper {
             b.extract_element(type, rawElems, b.i32_val(elemId + k * kBase));
         if (type.isBF16() && !preserveBF16) {
           // rocdl.mfma.f32.32x32x8bf16.1k calls for input of i16 type
+          // so does smfmac
           auto cast = b.bitcast(val, i16_ty);
           vec = b.insert_element(vecTy, vec, cast, b.i32_val(elemId));
         } else {
@@ -446,12 +447,24 @@ struct DotOpMFMAConversionHelper {
         for (int j = 0; j < n1; j++) {
           Type elemTy = typeConverter->convertType(type);
           Type ty = vec_ty(elemTy, kWidth);
+          if (type.isBF16() && !preserveBF16) {
+            ty = vec_ty(i16_ty, kBase);
+          }
           Value rawElems = tb.undef(ty);
           for (int k = 0; k < kWidth; ++k) {
-            rawElems = tb.insert_element(
-                ty, rawElems,
-                elems[kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k],
-                tb.i32_val(k));
+            auto val = elems[kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k];
+            if (type.isBF16() && !preserveBF16) {
+              auto cast = tb.bitcast(val, i16_ty);
+              rawElems = tb.insert_element(
+                  ty, rawElems,
+                  cast,
+                  tb.i32_val(k));
+            } else {
+              rawElems = tb.insert_element(
+                  ty, rawElems,
+                  val,
+                  tb.i32_val(k));
+            }
           }
 
           Value convertedElems;
@@ -782,14 +795,17 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     int kWidthSparse = aEncoding.getKWidth();
     int kWidth = bEncoding.getKWidth();
 
+    // We are reading half as many elements for the sparse A-input on the K-dim
+    assert(kWidthSparse * 2 == kWidth);
+
     const auto kDimInstrSize = mfmaLayout.getInstrShapeForOperand(kWidth, 0)[1];
 
     auto repA = sparseAMfmaLayout.getRepForOperand(aTensorTy.getShape(),
                                                    kWidthSparse, 0);
     auto repB = mfmaLayout.getRepForOperand(bTensorTy.getShape(), kWidth, 1);
 
-    // K-Dim comparison
     assert(repA[2] == repB[1]);
+    assert(repA[0] == repB[0]);
 
     Value loadedA = adaptor.getA();
     Value loadedB = adaptor.getB();
@@ -797,19 +813,21 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     auto numRepM = repA[1];
     auto numRepN = repB[2];
-    // The Sparse A-input has half as many elements on the K-dim as the B-input
     auto numRepAK = repA[2];
     auto numRepBK = repB[1];
     auto numRepB = repA[0];
-    assert(repA[0] == repB[0]);
 
-    bool preserveBF16 = intrinsicName.contains(".bf16") && mfmaVersion >= 4;
+    // Right now if we have a bf16 datatype, we want to emit i16 vectors in LLVM
+    // for the A, B inputs.
+    bool preserveBF16 = intrinsicName.contains(".bf16");
+
+    // The kBase is also half for the A input
     auto operandA = getValuesFromDotOperandLayoutStruct(
-        loadedA, numRepB, numRepM, numRepAK, kWidthSparse, kBase,
-        aTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
+        loadedA, numRepB, numRepM, numRepAK, kWidthSparse, kBase / 2,
+        aTensorTy.getElementType(), /*allowXF32=*/false, /*preserveBF16=*/false);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepBK, kWidth, kBase,
-        aTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
+        bTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -838,15 +856,31 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
           for (int k = 0; k < numRepBK; k++) {
             for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
-              printf("K: %d\n", k);
-              printf("kPack: %d\n", kPack);
-              acc = mfmaLayout.getIsTransposed()
-                        ? generateMFMAOp(intrinsicName,
-                                         operandB[kPack][{b, n, k}],
-                                         operandA[kPack][{b, m, k / 2}], acc)
-                        : generateMFMAOp(intrinsicName,
-                                         operandA[kPack][{b, m, k / 2}],
+
+              // TODO: transposed mfma layouts don't work with sparseDot
+              // This is because the A-input is always the sparse one, so
+              // you cannot just swap A, B.
+              // This is going to cause performance issues down the road.
+              // We should figure out if there's a fix.
+
+              // "For every smfmac instruction if CBSZ[1:0]=0,
+              // ABID[1:0] selects one of four 8-bit sets of sparse
+              // indices from reg_idx." --CK
+              //
+              // reg_idx contains aMeta
+              // abid selects the relevant sparsity metadata for the A input.
+              //
+              // reg_c = __builtin_amdgcn_smfmac_f32_32x32x16_bf16(reg_a, (sparse A input)
+              //                    reg_b,  (B input)
+              //                    reg_c,  (accumulator)
+              //                    reg_idx, <-- aMeta, all the indicies are in one VGPR
+              //                    0,
+              //                    abid);   <--
+
+              acc = generateMFMAOp(intrinsicName,
+                                         operandA[kPack][{b, m, k}],
                                          operandB[kPack][{b, n, k}], acc);
+
               if (!firstMfma)
                 firstMfma = acc;
             }

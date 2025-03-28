@@ -999,8 +999,9 @@ public:
       kWidth *= kPack;
 
     // The A input has half the K-dim of the B-input for 2:4 smfmac instructions
+    // So we want to load half as many elements
     auto newAEncoding =
-        ttg::DotOperandEncodingAttr::get(ctx, 0, sparseMfmaEnc, kWidth);
+        ttg::DotOperandEncodingAttr::get(ctx, 0, sparseMfmaEnc, kWidth / 2);
     auto newBEncoding =
         ttg::DotOperandEncodingAttr::get(ctx, 1, mfmaEnc, kWidth);
     a = convertAndCastTensor(rewriter, a, newAEncoding,

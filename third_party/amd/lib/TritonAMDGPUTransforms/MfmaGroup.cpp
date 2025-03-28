@@ -296,14 +296,14 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 
       // smfmac 2:4 Sparsity MFMA instructions
       // CDNA3-only for now
-      TRITON_MFMA_SPARSE_v(3, 32, 32, f16T, f16T, smfmac_f32_32x32x16_bf16, 16,
-                           4),
-      TRITON_MFMA_SPARSE_v(3, 16, 16, f16T, f16T, smfmac_f32_16x16x32_bf16, 32,
-                           4),
+      TRITON_MFMA_SPARSE_v(3, 32, 32, f16T, f16T, smfmac_f32_32x32x16_f16, 16,
+                           8),
+      TRITON_MFMA_SPARSE_v(3, 16, 16, f16T, f16T, smfmac_f32_16x16x32_f16, 32,
+                           8),
       TRITON_MFMA_SPARSE_v(3, 32, 32, bf16T, bf16T, smfmac_f32_32x32x16_bf16,
-                           16, 4),
+                           16, 8),
       TRITON_MFMA_SPARSE_v(3, 16, 16, bf16T, bf16T, smfmac_f32_16x16x32_bf16,
-                           32, 4),
+                           32, 8),
   };
 }
 
