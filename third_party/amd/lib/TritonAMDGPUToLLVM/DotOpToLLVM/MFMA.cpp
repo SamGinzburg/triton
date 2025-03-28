@@ -452,18 +452,13 @@ struct DotOpMFMAConversionHelper {
           }
           Value rawElems = tb.undef(ty);
           for (int k = 0; k < kWidth; ++k) {
-            auto val = elems[kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k];
+            auto val =
+                elems[kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k];
             if (type.isBF16() && !preserveBF16) {
               auto cast = tb.bitcast(val, i16_ty);
-              rawElems = tb.insert_element(
-                  ty, rawElems,
-                  cast,
-                  tb.i32_val(k));
+              rawElems = tb.insert_element(ty, rawElems, cast, tb.i32_val(k));
             } else {
-              rawElems = tb.insert_element(
-                  ty, rawElems,
-                  val,
-                  tb.i32_val(k));
+              rawElems = tb.insert_element(ty, rawElems, val, tb.i32_val(k));
             }
           }
 
@@ -824,7 +819,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // The kBase is also half for the A input
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepAK, kWidthSparse, kBase / 2,
-        aTensorTy.getElementType(), /*allowXF32=*/false, /*preserveBF16=*/false);
+        aTensorTy.getElementType(), /*allowXF32=*/false,
+        /*preserveBF16=*/false);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepBK, kWidth, kBase,
         bTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
@@ -870,16 +866,15 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // reg_idx contains aMeta
               // abid selects the relevant sparsity metadata for the A input.
               //
-              // reg_c = __builtin_amdgcn_smfmac_f32_32x32x16_bf16(reg_a, (sparse A input)
+              // reg_c = __builtin_amdgcn_smfmac_f32_32x32x16_bf16(reg_a,
+              // (sparse A input)
               //                    reg_b,  (B input)
               //                    reg_c,  (accumulator)
-              //                    reg_idx, <-- aMeta, all the indicies are in one VGPR
-              //                    0,
-              //                    abid);   <--
+              //                    reg_idx, <-- aMeta, all the indicies are in
+              //                    one VGPR 0, abid);   <--
 
-              acc = generateMFMAOp(intrinsicName,
-                                         operandA[kPack][{b, m, k}],
-                                         operandB[kPack][{b, n, k}], acc);
+              acc = generateMFMAOp(intrinsicName, operandA[kPack][{b, m, k}],
+                                   operandB[kPack][{b, n, k}], acc);
 
               if (!firstMfma)
                 firstMfma = acc;
