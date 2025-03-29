@@ -895,12 +895,16 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               //                    reg_idx, <-- aMeta, all the indicies are in
               //                    one VGPR 0, abid);
 
+              // NVIDIA takes in i16 values, while smfmac expects i32. We can pack the i16 vals together.
+              auto upper = tb.shl(tb.zext(i32_ty, aMetaElems[0]), tb.i32_val(16));
+              Value packedAMeta = tb.or_(i32_ty, upper, tb.zext(i32_ty, aMetaElems[1]));
+
               Value abid = tb.i32_val(k % 4);
               acc = generateSparseMFMAOp(intrinsicName,
                                          operandA[kPack][{b, m, k}],
                                          operandB[kPack][{b, n, k}],
                                          acc,
-                                         aMetaElems[k / 4],
+                                         packedAMeta,
                                          abid);
 
               if (!firstMfma)
