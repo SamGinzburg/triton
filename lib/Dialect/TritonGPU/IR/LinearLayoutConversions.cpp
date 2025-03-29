@@ -702,6 +702,7 @@ AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   // vector is a tuple of values mapping to matrix C's (N, M[, B]) indices.
   // TODO: we only support row-major aMeta for now
   SmallVector<unsigned> order = {1, 0};
+
     //getDefaultMmaOrder(*this);
   auto tileLayout = LinearLayout::empty();
 

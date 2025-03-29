@@ -969,7 +969,11 @@ public:
         warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
 
     auto aElemTy = mfmaInstr->aElementType;
-    bool isTransposed = true;
+
+    // We cannot support transposed MFMA layouts for 2:4 sparsity on AMD
+    // This is because we cannot swap the A, B inputs, as only the A input can be sparse.
+    bool isTransposed = false;
+
     mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
