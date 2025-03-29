@@ -758,7 +758,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     Value zeroFlag = b.i32_val(0);
     OperationState loweredOp(loc, intrinsicName);
     loweredOp.addTypes(resType);
-    loweredOp.addOperands({valA, valB, valC, zeroFlag, zeroFlag, zeroFlag});
+    loweredOp.addOperands({valA, valB, valC, regIdx, zeroFlag, abid});
     return rewriter.create(loweredOp)->getResult(0);
   }
 
@@ -787,6 +787,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto aTensorTy = cast<RankedTensorType>(a.getType());
     auto bTensorTy = cast<RankedTensorType>(b.getType());
     auto dTensorTy = cast<RankedTensorType>(d.getType());
+    auto aMetaTensorTy = cast<RankedTensorType>(aMeta.getType());
     auto elemTyA = aTensorTy.getElementType();
     auto elemTyB = bTensorTy.getElementType();
 
@@ -823,6 +824,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     Value loadedA = adaptor.getA();
     Value loadedB = adaptor.getB();
     Value loadedC = adaptor.getC();
+    Value loadedCompression = adaptor.getAMeta();
 
     Value loadedAMeta = adaptor.getAMeta();
 
@@ -855,6 +857,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         getNumSubmatrices(aTensorTy.getElementType(), mDim, nDim);
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
 
+    auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
+
     Value firstMfma;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
     for (int b = 0; b < numRepB; ++b) {
@@ -876,8 +880,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // TODO: transposed mfma layouts don't work with sparseDot
               // This is because the A-input is always the sparse one, so
               // you cannot just swap A, B.
-              // This is going to cause performance issues down the road.
-              // We should figure out if there's a fix.
 
               // "For every smfmac instruction if CBSZ[1:0]=0,
               // ABID[1:0] selects one of four 8-bit sets of sparse
@@ -891,12 +893,15 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               //                    reg_b,  (B input)
               //                    reg_c,  (accumulator)
               //                    reg_idx, <-- aMeta, all the indicies are in
-              //                    one VGPR 0, abid);   <--
+              //                    one VGPR 0, abid);
 
-              acc = generateMFMAOp(intrinsicName,
+              Value abid = tb.i32_val(k % 4);
+              acc = generateSparseMFMAOp(intrinsicName,
                                          operandA[kPack][{b, m, k}],
                                          operandB[kPack][{b, n, k}],
-                                         acc);
+                                         acc,
+                                         aMetaElems[k / 4],
+                                         abid);
 
               if (!firstMfma)
                 firstMfma = acc;
