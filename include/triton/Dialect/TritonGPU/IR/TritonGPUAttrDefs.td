@@ -1071,7 +1071,7 @@ def AMDSparseMfmaEncodingAttr : DistributedEncoding<"AMDSparseMfmaEncoding", "am
   let hasCustomAssemblyFormat = 1;
 }
 
-def AMDCompressionMfmaEncodingAttr : DistributedEncoding<"AMDCompressionMfmaEncoding", "amd_compression_mfma_encoding", []> {
+def AMDCompressionMfmaEncodingAttr : DistributedEncoding<"AMDCompressionMfmaEncoding", "amd_compression_mfma_encoding", [MmaEncodingTrait]> {
   let mnemonic = "amd_compression_mfma";
 
   let description = [{
@@ -1092,6 +1092,7 @@ def AMDCompressionMfmaEncodingAttr : DistributedEncoding<"AMDCompressionMfmaEnco
   );
 
   let extraClassDeclaration = extraDistributedDeclaration # [{
+    SmallVector<unsigned> getRepOrderForOperand(int opIdx) const;
   }];
 
   let genVerifyDecl = 1;

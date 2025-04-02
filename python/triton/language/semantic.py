@@ -1599,7 +1599,7 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optiona
                      ret_ty)
 
 
-def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, lhs_meta: tl.tensor, builder: ir.builder) -> tl.tensor:
+def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tensor, builder: ir.builder) -> tl.tensor:
     assert lhs.type.is_block() and rhs.type.is_block()
     assert lhs.dtype in (tl.float16, tl.bfloat16), f"Unsupported lhs dtype {lhs.dtype}"
     assert rhs.dtype in (tl.float16, tl.bfloat16), f"Unsupported rhs dtype {rhs.dtype}"
@@ -1619,6 +1619,10 @@ def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, lhs_meta: tl.tens
 
     _0 = builder.get_fp32(0)
     ret_scalar_ty = tl.float32
+
+    # TODO: fix this
+    print ("acc", acc)
+    print ("lhs_meta", lhs_meta)
 
     M = lhs.type.shape[-2]
     N = rhs.type.shape[-1]

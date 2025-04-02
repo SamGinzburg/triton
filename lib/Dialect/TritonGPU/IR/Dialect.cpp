@@ -1885,6 +1885,11 @@ SmallVector<unsigned> AMDCompressionMfmaEncodingAttr::getRepOrder() const {
   return getMatrixOrder(getRank(), /*rowMajor*/ true);
 }
 
+SmallVector<unsigned>
+AMDCompressionMfmaEncodingAttr::getRepOrderForOperand(int opIdx) const {
+  return getOrderForDotOperand(opIdx, getRank(), /*kContig*/ true);
+}
+
 void AMDCompressionMfmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"
           << "versionMajor = " << getVersionMajor()                      //

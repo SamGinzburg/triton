@@ -637,26 +637,12 @@ AMDSparseMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
         {{kRegister, {{0, 1}, {0, 4}, /*gap*/ {0, 8}}},
          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, /*gap*/ {0, 2}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
-    // For mfma.transposed layout, the element ownership among threads are
-    // "transposed" within each warp.
-    if (getIsTransposed())
-      tileLayout = LinearLayout(
-          {{kRegister, {{1, 0}, {4, 0}, /*gap*/ {8, 0}}},
-           {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, /*gap*/ {2, 0}}}},
-          {outDimNames[order[0]], outDimNames[order[1]]});
   } else {
     assert(getMDim() == 16);
     tileLayout = LinearLayout(
         {{kRegister, {{0, 1}}},
          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, /*gap*/ {0, 2}, {0, 4}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
-    // For mfma.transposed layout, the element ownership among threads are
-    // "transposed" within each warp.
-    if (getIsTransposed())
-      tileLayout = LinearLayout(
-          {{kRegister, {{1, 0}}},
-           {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, /*gap*/ {2, 0}, {4, 0}}}},
-          {outDimNames[order[0]], outDimNames[order[1]]});
   }
   if (hasBatchDim) {
     assert(order[2] == 0);
@@ -697,13 +683,7 @@ AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
 
   // https://github.com/ROCm/amd_matrix_instruction_calculator can print the
   // register and lane layout for mfma instructions.
-
-  // We use the order from fastest varying to slowest varying. So each base
-  // vector is a tuple of values mapping to matrix C's (N, M[, B]) indices.
-  // TODO: we only support row-major aMeta for now
-  SmallVector<unsigned> order = {1, 0};
-
-    //getDefaultMmaOrder(*this);
+  SmallVector<unsigned> order = getDefaultMmaOrder(*this);
   auto tileLayout = LinearLayout::empty();
 
   //   Matrix element to register mapping with no modifiers:
@@ -722,7 +702,7 @@ AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   // This is because only the A input can be sparse.
   if (getMDim() == 32) {
     tileLayout = LinearLayout(
-        {{kRegister, {{0, 1}, /*gap*/ {0, 2}}},
+        {{kRegister, {{0, 1}, {0, 4}, /*gap*/ {0, 8}}},
          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, /*gap*/ {0, 2}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
   } else {

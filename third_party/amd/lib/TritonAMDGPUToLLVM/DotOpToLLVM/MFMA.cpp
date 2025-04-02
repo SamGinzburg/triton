@@ -478,6 +478,10 @@ struct DotOpMFMAConversionHelper {
             } else if (type.isBF16()) {
               vals = extractOperands(rawElems, kWidth, kBase, bf16_ty,
                                      preserveBF16);
+            // 2:4 Sparse aMeta is passed as I16
+            } else if (type.isInteger(16)) {
+              vals = extractOperands(rawElems, kWidth, kBase, i16_ty,
+                                     preserveBF16);
             } else {
               assert(type.isF16() && "Unsupported data type");
               vals = extractOperands(rawElems, kWidth, kBase, f16_ty,
@@ -824,8 +828,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     Value loadedA = adaptor.getA();
     Value loadedB = adaptor.getB();
     Value loadedC = adaptor.getC();
-    Value loadedCompression = adaptor.getAMeta();
-
     Value loadedAMeta = adaptor.getAMeta();
 
     auto numRepM = repA[1];
@@ -846,6 +848,9 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepBK, kWidth, kBase,
         bTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
+    auto operandAMeta = getValuesFromDotOperandLayoutStruct(
+        loadedAMeta, numRepB, numRepM, numRepAK, kWidthSparse / 2, kBase / 4,
+        aMetaTensorTy.getElementType(), /*allowXF32=*/false, /*preserveBF16=*/false);
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -856,8 +861,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     const int subBlocks =
         getNumSubmatrices(aTensorTy.getElementType(), mDim, nDim);
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
-
-    auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
 
     Value firstMfma;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
@@ -877,7 +880,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           for (int k = 0; k < numRepBK; k++) {
             for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
 
-              // TODO: transposed mfma layouts don't work with sparseDot
+              // TODO: transposed mfma layouts don't work with sparse_dot
               // This is because the A-input is always the sparse one, so
               // you cannot just swap A, B.
 
@@ -896,8 +899,13 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               //                    one VGPR 0, abid);
 
               // NVIDIA takes in i16 values, while smfmac expects i32. We can pack the i16 vals together.
-              auto upper = tb.shl(tb.zext(i32_ty, aMetaElems[0]), tb.i32_val(16));
-              Value packedAMeta = tb.or_(i32_ty, upper, tb.zext(i32_ty, aMetaElems[1]));
+              // operandAMeta is a 2xi16 vector
+              auto aMeta = operandAMeta[kPack][{b, m, k}];
+              auto upperI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(0));
+              auto lowerI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(1));
+
+              auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
+              Value packedAMeta = tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
 
               Value abid = tb.i32_val(k % 4);
               acc = generateSparseMFMAOp(intrinsicName,
