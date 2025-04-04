@@ -971,7 +971,8 @@ public:
     auto aElemTy = mfmaInstr->aElementType;
 
     // We cannot support transposed MFMA layouts for 2:4 sparsity on AMD
-    // This is because we cannot swap the A, B inputs, as only the A input can be sparse.
+    // This is because we cannot swap the A, B inputs, as only the A input can
+    // be sparse.
     bool isTransposed = false;
 
     mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
@@ -991,8 +992,6 @@ public:
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
         /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
-
-
 
     Type mfmaAccType;
     if (oldRetType.getElementType().isIntOrIndex())
@@ -1022,7 +1021,8 @@ public:
                              mfmaInstr->aElementType);
     b = convertAndCastTensor(rewriter, b, newBEncoding,
                              mfmaInstr->bElementType);
-    aMeta = convertAndCastTensor(rewriter, aMeta, compressionMfmaEnc, aMetaType.getElementType());
+    aMeta = convertAndCastTensor(rewriter, aMeta, compressionMfmaEnc,
+                                 aMetaType.getElementType());
 
     auto newDot = rewriter.create<tt::SparseDotOp>(
         dotOp.getLoc(), newAcc.getType(), a, b, newAcc, aMeta);

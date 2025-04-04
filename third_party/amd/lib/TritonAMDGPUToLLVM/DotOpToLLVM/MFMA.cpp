@@ -452,8 +452,9 @@ struct DotOpMFMAConversionHelper {
           }
           Value rawElems = tb.undef(ty);
           for (int k = 0; k < kWidth; ++k) {
-            printf ("elems len: %d\n", elems.size());
-            printf ("idx into elems: %d\n", kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k);
+            printf("elems len: %d\n", elems.size());
+            printf("idx into elems: %d\n",
+                   kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k);
 
             auto val =
                 elems[kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k];
@@ -481,7 +482,7 @@ struct DotOpMFMAConversionHelper {
             } else if (type.isBF16()) {
               vals = extractOperands(rawElems, kWidth, kBase, bf16_ty,
                                      preserveBF16);
-            // 2:4 Sparse aMeta is passed as I16
+              // 2:4 Sparse aMeta is passed as I16
             } else if (type.isInteger(16)) {
               vals = extractOperands(rawElems, kWidth, kBase, i16_ty,
                                      preserveBF16);
@@ -754,12 +755,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                                   Location loc)
       : DotOpMFMAConversionHelper(mfmaLayout, rewriter, typeConverter, loc) {}
 
-  Value generateSparseMFMAOp(StringRef intrinsicName,
-                             Value valA,
-                             Value valB,
-                             Value valC,
-                             Value regIdx,
-                             Value abid) const {
+  Value generateSparseMFMAOp(StringRef intrinsicName, Value valA, Value valB,
+                             Value valC, Value regIdx, Value abid) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto resType = valC.getType();
     Value zeroFlag = b.i32_val(0);
@@ -815,7 +812,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     unsigned mfmaNDim = maybeMfmaIntrinsic->mDim;
     assert(mfmaMDim == mfmaNDim);
 
-
     auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
     auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
 
@@ -856,7 +852,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         /*preserveBF16=*/false);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepBK, kWidth, kBase,
-        bTensorTy.getElementType(), /*allowXF32=*/false, /*preserveBF16=*/false);
+        bTensorTy.getElementType(), /*allowXF32=*/false,
+        /*preserveBF16=*/false);
     // operandAMeta is technically not a "dot op layout", but we can
     // still reuse the logic here.
     // For bf16/fp16 inputs:
@@ -864,7 +861,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // TODO: for fp8/bf8 inputs:
     // Each lane has K=16 values which requires 8 indices per lane (16 bits),
     // so each SRC2 VGPR holds 2 sets of indices.
-
 
     // TODO: this works for some block sizes but not all, whats going on here?
 
@@ -879,11 +875,12 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       kBaseCompressed = 2;
     }
 
-    assert (kWidthCompressed >= kBaseCompressed && "kWidth >= kBase for compression matrix");
+    assert(kWidthCompressed >= kBaseCompressed &&
+           "kWidth >= kBase for compression matrix");
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        loadedAMeta, numRepB, numRepM, numRepAK, kWidthCompressed, kBaseCompressed,
-        aMetaTensorTy.getElementType(), /*allowXF32=*/false, /*preserveBF16=*/false);
-
+        loadedAMeta, numRepB, numRepM, numRepAK, kWidthCompressed,
+        kBaseCompressed, aMetaTensorTy.getElementType(), /*allowXF32=*/false,
+        /*preserveBF16=*/false);
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -932,26 +929,30 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               //                    reg_idx, <-- aMeta, all the indicies are in
               //                    one VGPR 0, abid);
 
-              // NVIDIA takes in i16 values(?), while smfmac expects i32. We can pack the i16 vals together.
-              // TODO: sync up with the nvidia side and settle on accepting I32s since apparently they also need that
-              // operandAMeta is a vector with the same shape as
-              // Every group of 4 K values shares
+              // NVIDIA takes in i16 values(?), while smfmac expects i32. We can
+              // pack the i16 vals together.
+              // TODO: sync up with the nvidia side and settle on accepting I32s
+              // since apparently they also need that operandAMeta is a vector
+              // with the same shape as Every group of 4 K values shares
 
               auto aMeta = operandAMeta[kPack][{b, m, k}];
               auto upperI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(0));
               auto lowerI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(1));
               auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
-              Value packedAMeta = tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
+              Value packedAMeta =
+                  tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
 
-              // Each lane has K=8 values (4 indicies per-lane---8 bits), so each VGPR from aMeta holds 4 sets
+              // Each lane has K=8 values (4 indicies per-lane---8 bits), so
+              // each VGPR from aMeta holds 4 sets
 
               Value abid = tb.i32_val(k % 4);
-              acc = generateSparseMFMAOp(intrinsicName,
-                                         operandA[kPack][{b, m, k}], // Loads 2 values for f16/bf16 inputs
-                                         operandB[kPack][{b, n, k}], // Loads 4 values for f16/bf16 inputs
-                                         acc,
-                                         packedAMeta,
-                                         abid);
+              acc = generateSparseMFMAOp(
+                  intrinsicName,
+                  operandA[kPack]
+                          [{b, m, k}], // Loads 2 values for f16/bf16 inputs
+                  operandB[kPack]
+                          [{b, n, k}], // Loads 4 values for f16/bf16 inputs
+                  acc, packedAMeta, abid);
 
               if (!firstMfma)
                 firstMfma = acc;

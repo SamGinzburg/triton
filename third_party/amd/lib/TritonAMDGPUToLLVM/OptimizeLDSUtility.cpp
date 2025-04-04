@@ -57,12 +57,12 @@ createTmpLayout(triton::gpu::DistributedEncodingTrait layout,
         ctx, src.getVersionMajor(), src.getVersionMinor(), warpsPerCTA,
         src.getMDim(), src.getNDim(), src.getIsTransposed(),
         src.getCTALayout());
-    if (auto src = dyn_cast<triton::gpu::AMDSparseMfmaEncodingAttr>(layout))
+  if (auto src = dyn_cast<triton::gpu::AMDSparseMfmaEncodingAttr>(layout))
     return triton::gpu::AMDSparseMfmaEncodingAttr::get(
         ctx, src.getVersionMajor(), src.getVersionMinor(), warpsPerCTA,
         src.getMDim(), src.getNDim(), src.getIsTransposed(),
         src.getCTALayout());
-    if (auto src = dyn_cast<triton::gpu::AMDCompressionMfmaEncodingAttr>(layout))
+  if (auto src = dyn_cast<triton::gpu::AMDCompressionMfmaEncodingAttr>(layout))
     return triton::gpu::AMDCompressionMfmaEncodingAttr::get(
         ctx, src.getVersionMajor(), src.getVersionMinor(), warpsPerCTA,
         src.getMDim(), src.getNDim(), src.getIsTransposed(),

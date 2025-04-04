@@ -695,14 +695,15 @@ AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   //    B[k][j].block Lane: 32 * floor(k / 8) + j
   //    D[i][j].block GPR: 4 * floor(i / 8) + (i % 4)
 
-  // So the compression matrix has the same lane configuration as the sparse A input
-  // The difference is that there is only 1 register, which is represented in Va.c format
+  // So the compression matrix has the same lane configuration as the sparse A
+  // input The difference is that there is only 1 register, which is represented
+  // in Va.c format
 
-  // We don't need to support transposed layouts because we can't transpose sparse MFMA ops.
-  // This is because only the A input can be sparse.
+  // We don't need to support transposed layouts because we can't transpose
+  // sparse MFMA ops. This is because only the A input can be sparse.
   if (getMDim() == 32) {
     tileLayout = LinearLayout(
-      {{kRegister, {{0, 1}, {0, 0}}},
+        {{kRegister, {{0, 1}, {0, 0}}},
          {kLane, {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {16, 0}, /*gap*/ {0, 2}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
   } else {

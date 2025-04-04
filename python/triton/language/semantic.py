@@ -1621,8 +1621,8 @@ def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
     ret_scalar_ty = tl.float32
 
     # TODO: fix this
-    print ("acc", acc)
-    print ("lhs_meta", lhs_meta)
+    print("acc", acc)
+    print("lhs_meta", lhs_meta)
 
     M = lhs.type.shape[-2]
     N = rhs.type.shape[-1]
