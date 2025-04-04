@@ -452,6 +452,9 @@ struct DotOpMFMAConversionHelper {
           }
           Value rawElems = tb.undef(ty);
           for (int k = 0; k < kWidth; ++k) {
+            printf ("elems len: %d\n", elems.size());
+            printf ("idx into elems: %d\n", kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k);
+
             auto val =
                 elems[kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k];
             if (type.isBF16() && !preserveBF16) {
@@ -808,6 +811,10 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     intrinsicName = maybeMfmaIntrinsic->name;
     unsigned kBase = maybeMfmaIntrinsic->kBase;
+    unsigned mfmaMDim = maybeMfmaIntrinsic->mDim;
+    unsigned mfmaNDim = maybeMfmaIntrinsic->mDim;
+    assert(mfmaMDim == mfmaNDim);
+
 
     auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
     auto bEncoding = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
@@ -824,9 +831,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                                                    kWidthSparse, 0);
     auto repB = mfmaLayout.getRepForOperand(bTensorTy.getShape(), kWidth, 1);
 
-    assert(repA[2] == repB[1]);
-    assert(repA[0] == repB[0]);
-
     Value loadedA = adaptor.getA();
     Value loadedB = adaptor.getB();
     Value loadedC = adaptor.getC();
@@ -838,21 +842,48 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto numRepBK = repB[1];
     auto numRepB = repA[0];
 
+    assert(repA[0] == repB[0] && "numRepB should match between A, B inputs");
+    assert(numRepAK == numRepBK && "numRepK should match between A, B inputs");
+
     // Right now if we have a bf16 datatype, we want to emit i16 vectors in LLVM
     // for the A, B inputs.
     bool preserveBF16 = intrinsicName.contains(".bf16");
 
-    // The kBase is also half for the A input
+    // The kBase is also half for the A input (4 values per-lane)
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepAK, kWidthSparse, kBase / 2,
         aTensorTy.getElementType(), /*allowXF32=*/false,
         /*preserveBF16=*/false);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepBK, kWidth, kBase,
-        bTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
+        bTensorTy.getElementType(), /*allowXF32=*/false, /*preserveBF16=*/false);
+    // operandAMeta is technically not a "dot op layout", but we can
+    // still reuse the logic here.
+    // For bf16/fp16 inputs:
+    // Each lane has K=8 values which requires 4 indices per lane (8 bits)
+    // TODO: for fp8/bf8 inputs:
+    // Each lane has K=16 values which requires 8 indices per lane (16 bits),
+    // so each SRC2 VGPR holds 2 sets of indices.
+
+
+    // TODO: this works for some block sizes but not all, whats going on here?
+
+    auto kWidthCompressed = 0;
+    auto kBaseCompressed = 0;
+
+    if (mfmaMDim == 32) {
+      kWidthCompressed = 4;
+      kBaseCompressed = 2;
+    } else {
+      kWidthCompressed = 2;
+      kBaseCompressed = 2;
+    }
+
+    assert (kWidthCompressed >= kBaseCompressed && "kWidth >= kBase for compression matrix");
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        loadedAMeta, numRepB, numRepM, numRepAK, kWidthSparse, kBase / 4,
+        loadedAMeta, numRepB, numRepM, numRepAK, kWidthCompressed, kBaseCompressed,
         aMetaTensorTy.getElementType(), /*allowXF32=*/false, /*preserveBF16=*/false);
+
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -905,12 +936,12 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // TODO: sync up with the nvidia side and settle on accepting I32s since apparently they also need that
               // operandAMeta is a vector with the same shape as
               // Every group of 4 K values shares
+
               auto aMeta = operandAMeta[kPack][{b, m, k}];
               auto upperI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(0));
               auto lowerI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(1));
               auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
               Value packedAMeta = tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
-
 
               // Each lane has K=8 values (4 indicies per-lane---8 bits), so each VGPR from aMeta holds 4 sets
 

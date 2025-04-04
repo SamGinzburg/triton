@@ -296,6 +296,7 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
 
       // smfmac 2:4 Sparsity MFMA instructions
       // CDNA3-only for now
+      // kBase is 8 for fp16/bf16 and 16 for fp8/bf8/i8
       TRITON_MFMA_SPARSE_v(3, 32, 32, f16T, f16T, smfmac_f32_32x32x16_f16, 16,
                            8),
       TRITON_MFMA_SPARSE_v(3, 16, 16, f16T, f16T, smfmac_f32_16x16x32_f16, 32,
