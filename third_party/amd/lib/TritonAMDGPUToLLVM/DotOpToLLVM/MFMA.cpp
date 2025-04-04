@@ -760,9 +760,11 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto resType = valC.getType();
     Value zeroFlag = b.i32_val(0);
+    // TODO: why does the amd matrix calculator say I need this??
+    Value cbsz = b.i32_val(1);
     OperationState loweredOp(loc, intrinsicName);
     loweredOp.addTypes(resType);
-    loweredOp.addOperands({valA, valB, valC, regIdx, zeroFlag, abid});
+    loweredOp.addOperands({valA, valB, valC, regIdx, cbsz, abid});
     return rewriter.create(loweredOp)->getResult(0);
   }
 
@@ -849,7 +851,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         loadedB, numRepB, numRepN, numRepBK, kWidth, kBase,
         bTensorTy.getElementType(), /*allowXF32=*/false, preserveBF16);
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        loadedAMeta, numRepB, numRepM, numRepAK, kWidthSparse / 2, kBase / 4,
+        loadedAMeta, numRepB, numRepM, numRepAK, kWidthSparse, kBase / 4,
         aMetaTensorTy.getElementType(), /*allowXF32=*/false, /*preserveBF16=*/false);
 
     auto dstElemTy = dTensorTy.getElementType();
@@ -878,6 +880,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           acc = zeroAuxiliarBlocks(subBlocks, acc);
 
           for (int k = 0; k < numRepBK; k++) {
+            printf("k value encountered: %d\n", k);
             for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
 
               // TODO: transposed mfma layouts don't work with sparse_dot
@@ -898,19 +901,23 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               //                    reg_idx, <-- aMeta, all the indicies are in
               //                    one VGPR 0, abid);
 
-              // NVIDIA takes in i16 values, while smfmac expects i32. We can pack the i16 vals together.
-              // operandAMeta is a 2xi16 vector
+              // NVIDIA takes in i16 values(?), while smfmac expects i32. We can pack the i16 vals together.
+              // TODO: sync up with the nvidia side and settle on accepting I32s since apparently they also need that
+              // operandAMeta is a vector with the same shape as
+              // Every group of 4 K values shares
               auto aMeta = operandAMeta[kPack][{b, m, k}];
               auto upperI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(0));
               auto lowerI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(1));
-
               auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
               Value packedAMeta = tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
 
+
+              // Each lane has K=8 values (4 indicies per-lane---8 bits), so each VGPR from aMeta holds 4 sets
+
               Value abid = tb.i32_val(k % 4);
               acc = generateSparseMFMAOp(intrinsicName,
-                                         operandA[kPack][{b, m, k}],
-                                         operandB[kPack][{b, n, k}],
+                                         operandA[kPack][{b, m, k}], // Loads 2 values for f16/bf16 inputs
+                                         operandB[kPack][{b, n, k}], // Loads 4 values for f16/bf16 inputs
                                          acc,
                                          packedAMeta,
                                          abid);
