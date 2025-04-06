@@ -761,7 +761,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto resType = valC.getType();
     Value zeroFlag = b.i32_val(0);
     // TODO: why does the amd matrix calculator say I need this??
-    Value cbsz = b.i32_val(1);
+    Value cbsz = b.i32_val(0);
     OperationState loweredOp(loc, intrinsicName);
     loweredOp.addTypes(resType);
     loweredOp.addOperands({valA, valB, valC, regIdx, cbsz, abid});
@@ -854,6 +854,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         loadedB, numRepB, numRepN, numRepBK, kWidth, kBase,
         bTensorTy.getElementType(), /*allowXF32=*/false,
         /*preserveBF16=*/false);
+
     // operandAMeta is technically not a "dot op layout", but we can
     // still reuse the logic here.
     // For bf16/fp16 inputs:
@@ -862,25 +863,26 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // Each lane has K=16 values which requires 8 indices per lane (16 bits),
     // so each SRC2 VGPR holds 2 sets of indices.
 
-    // TODO: this works for some block sizes but not all, whats going on here?
+    auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
+    SmallVector<Value> aMetaUnpacked(aMetaElems.size() / 2);
 
-    auto kWidthCompressed = 0;
-    auto kBaseCompressed = 0;
-
-    if (mfmaMDim == 32) {
-      kWidthCompressed = 4;
-      kBaseCompressed = 2;
-    } else {
-      kWidthCompressed = 2;
-      kBaseCompressed = 2;
+    // Let's unpack the elements. We read in i16's and pack them into i32 values.
+    // Later we will index into thes i32 values along the k-dim (k / 4) in conjunction with the abid selector (k % 4).
+    for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += 2) {
+      auto upperI16 = tb.bitcast(aMetaElems[elemIdx], i16_ty);
+      auto lowerI16 = tb.bitcast(aMetaElems[elemIdx + 1], i16_ty);
+      auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
+      Value packedAMeta =
+          tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
+      aMetaUnpacked[elemIdx / 2] = packedAMeta;
     }
 
-    assert(kWidthCompressed >= kBaseCompressed &&
-           "kWidth >= kBase for compression matrix");
-    auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        loadedAMeta, numRepB, numRepM, numRepAK, kWidthCompressed,
-        kBaseCompressed, aMetaTensorTy.getElementType(), /*allowXF32=*/false,
-        /*preserveBF16=*/false);
+    printf("number of smfmac ops: %d\n", numRepB * numRepM * numRepN * numRepBK);
+    printf("number of aMeta vals to load: %d\n", aMetaElems.size());
+
+    //assert (numRepBK % 4 == 0 && "[debug] smfmac only currently working for numRepB % 4 == 0");
+    //assert (numRepB * numRepM * numRepN * numRepBK >= 4 && numRepB * numRepM * numRepN * numRepBK % 4 == 0 &&
+    //        "For now, only handle the case with smfmac where at least 4 smfmac ops are generated per-lane & the number of smfmac ops is a multiple of 4.");
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -893,6 +895,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
 
     Value firstMfma;
+
+    auto generatedOp = 0;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
     for (int b = 0; b < numRepB; ++b) {
       for (int m = 0; m < numRepM; ++m) {
@@ -934,31 +938,35 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // TODO: sync up with the nvidia side and settle on accepting I32s
               // since apparently they also need that operandAMeta is a vector
               // with the same shape as Every group of 4 K values shares
-
+              /*
               auto aMeta = operandAMeta[kPack][{b, m, k}];
-              auto upperI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(0));
-              auto lowerI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(1));
+              auto upperI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(1));
+              auto lowerI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(0));
               auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
               Value packedAMeta =
                   tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
-
+              */
               // Each lane has K=8 values (4 indicies per-lane---8 bits), so
               // each VGPR from aMeta holds 4 sets
-
-              Value abid = tb.i32_val(k % 4);
+              printf ("generatedOp: %d\n", generatedOp);
+              Value abid = tb.i32_val(generatedOp % 4);
               acc = generateSparseMFMAOp(
                   intrinsicName,
                   operandA[kPack]
                           [{b, m, k}], // Loads 2 values for f16/bf16 inputs
                   operandB[kPack]
                           [{b, n, k}], // Loads 4 values for f16/bf16 inputs
-                  acc, packedAMeta, abid);
-
+                  acc,
+                  aMetaUnpacked[generatedOp / 4],
+                  //packedAMeta,
+                  abid);
+              //generatedOp++;
               if (!firstMfma)
                 firstMfma = acc;
             }
           }
 
+          generatedOp++;
           acc = reduceSubBlocks(subBlocks, acc);
           adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
                                 kDimInstrSize, kDimOperandSize, elemsPerVec);
