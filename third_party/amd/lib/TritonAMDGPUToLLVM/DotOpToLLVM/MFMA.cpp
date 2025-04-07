@@ -760,8 +760,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     auto resType = valC.getType();
     Value zeroFlag = b.i32_val(0);
-    // TODO: why does the amd matrix calculator say I need this??
-    Value cbsz = b.i32_val(1);
+    Value cbsz = b.i32_val(0);
     OperationState loweredOp(loc, intrinsicName);
     loweredOp.addTypes(resType);
     loweredOp.addOperands({valA, valB, valC, regIdx, cbsz, abid});
@@ -855,6 +854,13 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         bTensorTy.getElementType(), /*allowXF32=*/false,
         /*preserveBF16=*/false);
 
+    // There are 1/8 as many elements on the K-dim for the metadata layout.
+    printf("numRepBK: %d\n", numRepBK);
+    auto operandAMeta = getValuesFromDotOperandLayoutStruct(
+        loadedAMeta, numRepB, numRepM, std::max((unsigned long)numRepBK / 8, 1ul), 1, 1,
+        aMetaTensorTy.getElementType(), /*allowXF32=*/false,
+        /*preserveBF16=*/false);
+
     // operandAMeta is technically not a "dot op layout", but we can
     // still reuse the logic here.
     // For bf16/fp16 inputs:
@@ -863,22 +869,14 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // Each lane has K=16 values which requires 8 indices per lane (16 bits),
     // so each SRC2 VGPR holds 2 sets of indices.
 
-    auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
-    SmallVector<Value> aMetaUnpacked(aMetaElems.size() / 2);
+    //auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
+    //SmallVector<Value> aMetaUnpacked(kpack);
 
     // Let's unpack the elements. We read in i16's and pack them into i32 values.
     // Later we will index into thes i32 values along the k-dim (k / 4) in conjunction with the abid selector (k % 4).
-    for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += 2) {
-      auto upperI16 = tb.bitcast(aMetaElems[elemIdx + 1], i16_ty);
-      auto lowerI16 = tb.bitcast(aMetaElems[elemIdx], i16_ty);
-      auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
-      Value packedAMeta =
-          tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
-      aMetaUnpacked[elemIdx / 2] = packedAMeta;
-    }
 
-    printf("number of smfmac ops: %d\n", numRepB * numRepM * numRepN * numRepBK);
-    printf("number of aMeta vals to load: %d\n", aMetaElems.size());
+    //printf("number of smfmac ops: %d\n", numRepB * numRepM * numRepN * numRepBK);
+    //printf("number of aMeta vals to load: %d\n", aMetaElems.size());
 
     //assert (numRepBK % 4 == 0 && "[debug] smfmac only currently working for numRepB % 4 == 0");
     //assert (numRepB * numRepM * numRepN * numRepBK >= 4 && numRepB * numRepM * numRepN * numRepBK % 4 == 0 &&
@@ -940,8 +938,22 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // with the same shape as Every group of 4 K values shares
               // Each lane has K=8 values (4 indicies per-lane---8 bits), so
               // each VGPR from aMeta holds 4 sets.
-              printf ("generatedOp: %d\n", generatedOp);
-              Value abid = tb.i32_val(generatedOp % 4);
+              auto values = operandAMeta[kPack][{b, m, k}];
+              Value upperBytes, upperI16;
+              if (numRepBK > 1) {
+                upperBytes = tb.extract_element(i16_ty, values, tb.i32_val(k + 1));
+                upperI16 = tb.bitcast(upperBytes, i16_ty);
+              } else {
+                upperI16 = tb.i16_val(0);
+              }
+
+              Value lowerBytes = tb.extract_element(i16_ty, values, tb.i32_val(k));
+              auto lowerI16 = tb.bitcast(lowerBytes, i16_ty);
+              auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
+              Value packedAMeta =
+                  tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
+
+              Value abid = tb.i32_val(k % 4);
               acc = generateSparseMFMAOp(
                   intrinsicName,
                   operandA[kPack]
@@ -949,7 +961,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                   operandB[kPack]
                           [{b, n, k}], // Loads 4 values for f16/bf16 inputs
                   acc,
-                  aMetaUnpacked[generatedOp / 4],
+                  packedAMeta,
                   abid);
 
               generatedOp++;
