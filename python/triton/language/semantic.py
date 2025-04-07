@@ -1623,6 +1623,7 @@ def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
     # TODO: fix this
     print("acc", acc)
     print("lhs_meta", lhs_meta)
+    assert acc is None, "AMD sparse dot does not support fast acc"
 
     M = lhs.type.shape[-2]
     N = rhs.type.shape[-1]

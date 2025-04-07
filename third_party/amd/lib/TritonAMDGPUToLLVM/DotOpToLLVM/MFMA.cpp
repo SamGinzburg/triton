@@ -761,7 +761,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto resType = valC.getType();
     Value zeroFlag = b.i32_val(0);
     // TODO: why does the amd matrix calculator say I need this??
-    Value cbsz = b.i32_val(0);
+    Value cbsz = b.i32_val(1);
     OperationState loweredOp(loc, intrinsicName);
     loweredOp.addTypes(resType);
     loweredOp.addOperands({valA, valB, valC, regIdx, cbsz, abid});
@@ -869,8 +869,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // Let's unpack the elements. We read in i16's and pack them into i32 values.
     // Later we will index into thes i32 values along the k-dim (k / 4) in conjunction with the abid selector (k % 4).
     for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += 2) {
-      auto upperI16 = tb.bitcast(aMetaElems[elemIdx], i16_ty);
-      auto lowerI16 = tb.bitcast(aMetaElems[elemIdx + 1], i16_ty);
+      auto upperI16 = tb.bitcast(aMetaElems[elemIdx + 1], i16_ty);
+      auto lowerI16 = tb.bitcast(aMetaElems[elemIdx], i16_ty);
       auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
       Value packedAMeta =
           tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
@@ -938,16 +938,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // TODO: sync up with the nvidia side and settle on accepting I32s
               // since apparently they also need that operandAMeta is a vector
               // with the same shape as Every group of 4 K values shares
-              /*
-              auto aMeta = operandAMeta[kPack][{b, m, k}];
-              auto upperI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(1));
-              auto lowerI16 = tb.extract_element(i16_ty, aMeta, tb.i32_val(0));
-              auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
-              Value packedAMeta =
-                  tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
-              */
               // Each lane has K=8 values (4 indicies per-lane---8 bits), so
-              // each VGPR from aMeta holds 4 sets
+              // each VGPR from aMeta holds 4 sets.
               printf ("generatedOp: %d\n", generatedOp);
               Value abid = tb.i32_val(generatedOp % 4);
               acc = generateSparseMFMAOp(
@@ -958,18 +950,18 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                           [{b, n, k}], // Loads 4 values for f16/bf16 inputs
                   acc,
                   aMetaUnpacked[generatedOp / 4],
-                  //packedAMeta,
                   abid);
-              //generatedOp++;
+
+              generatedOp++;
               if (!firstMfma)
                 firstMfma = acc;
             }
           }
 
-          generatedOp++;
           acc = reduceSubBlocks(subBlocks, acc);
+          // We obtained kDimOperandSize from the A input, which is 2:4 sparse
           adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
-                                kDimInstrSize, kDimOperandSize, elemsPerVec);
+                                kDimInstrSize, kDimOperandSize * 2, elemsPerVec);
         }
       }
     }
