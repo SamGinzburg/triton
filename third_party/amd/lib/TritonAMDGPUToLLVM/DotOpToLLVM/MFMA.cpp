@@ -486,6 +486,9 @@ struct DotOpMFMAConversionHelper {
             } else if (type.isInteger(16)) {
               vals = extractOperands(rawElems, kWidth, kBase, i16_ty,
                                      preserveBF16);
+            } else if (type.isInteger(32)) {
+              vals = extractOperands(rawElems, kWidth, kBase, i32_ty,
+                                     preserveBF16);
             } else {
               assert(type.isF16() && "Unsupported data type");
               vals = extractOperands(rawElems, kWidth, kBase, f16_ty,
@@ -862,33 +865,36 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     printf("numRepBK: %d\n", numRepBK);
     printf("kWidthSparse: %d\n", kWidthSparse);
     printf("kBase: %d\n", kWidth);
-    // We need one i32 per 4 smfmac's
+
+    assert(aMetaTensorTy.getElementType() == i16_ty && "aMeta elems must be i16");
+
+
+    auto numMFMAs = numRepB * numRepM * numRepN * numRepBK;
+    auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
+    SmallVector<Value> aMetaPacked(aMetaElems.size() / 2);
+
+    for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += 2) {
+      auto upperI16 = tb.bitcast(aMetaElems[elemIdx + 1], i16_ty);
+      auto lowerI16 = tb.bitcast(aMetaElems[elemIdx], i16_ty);
+      auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
+      Value packedAMeta =
+          tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
+      aMetaPacked[elemIdx / 2] = packedAMeta;
+    }
+
+    auto ty = LLVM::LLVMStructType::getLiteral(
+          rewriter.getContext(), SmallVector<Type>(aMetaPacked.size(), i32_ty));
+    //Type ty = vec_ty(i32_ty, aMetaPacked.size());
+    Value packedAMeta =
+        packLLElements(loc, typeConverter, aMetaPacked, rewriter, ty);
+
+    // Each thread will load 1 i32 metadata value per SMFMA
+    // We pack the values along the K-Dim
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        loadedAMeta, numRepB, numRepM, std::max((unsigned long)numRepBK / 4, 1ul),
-        1, 1,
-        aMetaTensorTy.getElementType(), /*allowXF32=*/false,
+        packedAMeta, numRepB, numRepM, std::max((unsigned long)(numRepBK / 2), 1ul),
+        /*kWidth=*/1ul, /*kBase=*/1ul,
+        i32_ty, /*allowXF32=*/false,
         /*preserveBF16=*/false);
-
-    // operandAMeta is technically not a "dot op layout", but we can
-    // still reuse the logic here.
-    // For bf16/fp16 inputs:
-    // Each lane has K=8 values which requires 4 indices per lane (8 bits)
-    // TODO: for fp8/bf8 inputs:
-    // Each lane has K=16 values which requires 8 indices per lane (16 bits),
-    // so each SRC2 VGPR holds 2 sets of indices.
-
-    //auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
-    //SmallVector<Value> aMetaUnpacked(kpack);
-
-    // Let's unpack the elements. We read in i16's and pack them into i32 values.
-    // Later we will index into thes i32 values along the k-dim (k / 4) in conjunction with the abid selector (k % 4).
-
-    //printf("number of smfmac ops: %d\n", numRepB * numRepM * numRepN * numRepBK);
-    //printf("number of aMeta vals to load: %d\n", aMetaElems.size());
-
-    //assert (numRepBK % 4 == 0 && "[debug] smfmac only currently working for numRepB % 4 == 0");
-    //assert (numRepB * numRepM * numRepN * numRepBK >= 4 && numRepB * numRepM * numRepN * numRepBK % 4 == 0 &&
-    //        "For now, only handle the case with smfmac where at least 4 smfmac ops are generated per-lane & the number of smfmac ops is a multiple of 4.");
 
     auto dstElemTy = dTensorTy.getElementType();
     auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -947,19 +953,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // Each lane has K=8 values (4 indicies per-lane---8 bits), so
               // each VGPR from aMeta holds 4 sets.
               auto values = operandAMeta[kPack][{b, m, k / 4}];
-              Value upperBytes, upperI16;
-              if (numRepBK / 4 > 1) {
-                upperBytes = tb.extract_element(i16_ty, values, tb.i32_val(1));
-                upperI16 = tb.bitcast(upperBytes, i16_ty);
-              } else {
-                upperI16 = tb.i16_val(0);
-              }
-
-              Value lowerBytes = tb.extract_element(i16_ty, values, tb.i32_val(0));
-              auto lowerI16 = tb.bitcast(lowerBytes, i16_ty);
-              auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
-              Value packedAMeta =
-                  tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
+              auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
 
               Value abid = tb.i32_val(k % 4);
               acc = generateSparseMFMAOp(
@@ -969,7 +963,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                   operandB[kPack]
                           [{b, n, k}], // Loads 4 values for f16/bf16 inputs
                   acc,
-                  packedAMeta,
+                  metadata,
                   abid);
 
               generatedOp++;
