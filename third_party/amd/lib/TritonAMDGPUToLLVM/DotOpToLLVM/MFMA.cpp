@@ -855,9 +855,17 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         /*preserveBF16=*/false);
 
     // There are 1/8 as many elements on the K-dim for the metadata layout.
+    // 3. kBase: the number of elements each thread holds for a single mfma
+    //    instruction.
+    // 1. kWidth: the number of elements each thread loads from shared memory in
+    //    preparation for mfma instructions.
     printf("numRepBK: %d\n", numRepBK);
+    printf("kWidthSparse: %d\n", kWidthSparse);
+    printf("kBase: %d\n", kWidth);
+    // We need one i32 per 4 smfmac's
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        loadedAMeta, numRepB, numRepM, std::max((unsigned long)numRepBK / 8, 1ul), 1, 1,
+        loadedAMeta, numRepB, numRepM, std::max((unsigned long)numRepBK / 4, 1ul),
+        1, 1,
         aMetaTensorTy.getElementType(), /*allowXF32=*/false,
         /*preserveBF16=*/false);
 
@@ -938,16 +946,16 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // with the same shape as Every group of 4 K values shares
               // Each lane has K=8 values (4 indicies per-lane---8 bits), so
               // each VGPR from aMeta holds 4 sets.
-              auto values = operandAMeta[kPack][{b, m, k}];
+              auto values = operandAMeta[kPack][{b, m, k / 4}];
               Value upperBytes, upperI16;
-              if (numRepBK > 1) {
-                upperBytes = tb.extract_element(i16_ty, values, tb.i32_val(k + 1));
+              if (numRepBK / 4 > 1) {
+                upperBytes = tb.extract_element(i16_ty, values, tb.i32_val(1));
                 upperI16 = tb.bitcast(upperBytes, i16_ty);
               } else {
                 upperI16 = tb.i16_val(0);
               }
 
-              Value lowerBytes = tb.extract_element(i16_ty, values, tb.i32_val(k));
+              Value lowerBytes = tb.extract_element(i16_ty, values, tb.i32_val(0));
               auto lowerI16 = tb.bitcast(lowerBytes, i16_ty);
               auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
               Value packedAMeta =
