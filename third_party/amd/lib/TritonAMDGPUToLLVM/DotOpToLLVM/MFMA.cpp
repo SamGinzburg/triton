@@ -892,7 +892,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // We pack the values along the K-Dim
     unsigned long adjustKPack = kWidth / kBase;
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        packedAMeta, numRepB, numRepM, std::max((unsigned long)(numRepBK / 4), 1ul),
+        packedAMeta, numRepB, numRepM, std::max((unsigned long)(numRepBK / 2), 1ul),
         /*kWidth=*/std::max(adjustKPack / 2, 1ul), /*kBase=*/1ul,
         i32_ty, /*allowXF32=*/false,
         /*preserveBF16=*/false);
@@ -947,12 +947,9 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
               // NVIDIA takes in i16 values(?), while smfmac expects i32. We can
               // pack the i16 vals together.
-              // TODO: sync up with the nvidia side and settle on accepting I32s
-              // since apparently they also need that operandAMeta is a vector
-              // with the same shape as Every group of 4 K values shares
-              // Each lane has K=8 values (4 indicies per-lane---8 bits), so
-              // each VGPR from aMeta holds 4 sets.
-              // The kPack is 2 instead of 4, because we packed the i16 values here.
+              // TODO: sync up with the nvidia side and settle on accepting I32s instead (packed by user)
+
+              // kPack / 2 because we are packing 2 i16 values together
               auto values = operandAMeta[kPack / 2][{b, m, k / 4}];
               auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
 

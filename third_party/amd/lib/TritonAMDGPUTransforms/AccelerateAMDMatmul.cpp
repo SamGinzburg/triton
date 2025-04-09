@@ -1378,9 +1378,10 @@ public:
           .add<::BlockedToMFMA, ::ScaledBlockedToMFMA>(
               context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
               /*benefit=*/2);
+      // kPack of 2 ensures that we can pack 2 i16 values into an i32 later
       patterns
           .add<::SparseBlockedToMFMA>(
-              context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
+              context, getMfmaVersion(isaFamily), matrixInstructionSize, /*kPack=*/2,
               /*benefit=*/2);
 
       break;
