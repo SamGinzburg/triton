@@ -913,8 +913,9 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
     for (int b = 0; b < numRepB; ++b) {
-      for (int m = 0; m < numRepM; ++m) {
-        for (int n = 0; n < numRepN; ++n) {
+      for (int n = 0; n < numRepN; ++n) {
+        auto abidSelector = 0;
+        for (int m = 0; m < numRepM; ++m) {
           Value acc = tb.undef(vecTy);
           for (unsigned v = 0; v < elemsPerVec; ++v) {
             acc = tb.insert_element(
@@ -953,16 +954,18 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // instead (packed by user)
 
               // kPack / 2 because we are packing 2 i16 values together
-              auto values = operandAMeta[kPack / 2][{b, m, k / 4}];
+              auto values = operandAMeta[kPack / 2][{b, m, k}];
               auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
 
-              Value abid = tb.i32_val(k % 4);
+              Value abid = tb.i32_val(abidSelector % 4);
               acc = generateSparseMFMAOp(
                   intrinsicName, operandA[kPack][{b, m, k}],
                   operandB[kPack][{b, n, k}], acc, metadata, abid);
 
               if (!firstMfma)
                 firstMfma = acc;
+
+              abidSelector++;
             }
           }
 
