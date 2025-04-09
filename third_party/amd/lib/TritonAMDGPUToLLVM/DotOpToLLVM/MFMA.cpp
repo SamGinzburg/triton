@@ -437,7 +437,7 @@ struct DotOpMFMAConversionHelper {
   /// appropriate for mfma instructions
   virtual SmallVector<ValueTable> getValuesFromDotOperandLayoutStruct(
       Value value, int batch, int n0, int n1, int kWidth, int kBase, Type type,
-      bool allowXF32, bool preserveBF16, bool isConstantScale = false) const {
+      bool allowXF32, bool preserveBF16, bool isConstantScale = false, bool isSparseDot = false) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
     int kpack = kWidth / kBase;
@@ -447,7 +447,8 @@ struct DotOpMFMAConversionHelper {
         for (int j = 0; j < n1; j++) {
           Type elemTy = typeConverter->convertType(type);
           Type ty = vec_ty(elemTy, kWidth);
-          if (type.isBF16() && !preserveBF16) {
+          // We only need this for sparse dot
+          if (type.isBF16() && !preserveBF16 && isSparseDot) {
             ty = vec_ty(i16_ty, kBase);
           }
           Value rawElems = tb.undef(ty);
@@ -458,7 +459,8 @@ struct DotOpMFMAConversionHelper {
 
             auto val =
                 elems[kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k];
-            if (type.isBF16() && !preserveBF16) {
+            // Same case as earlier, we only need this for sparse dot
+            if (type.isBF16() && !preserveBF16 && isSparseDot) {
               auto cast = tb.bitcast(val, i16_ty);
               rawElems = tb.insert_element(ty, rawElems, cast, tb.i32_val(k));
             } else {
@@ -851,11 +853,11 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepAK, kWidthSparse, kBase / 2,
         aTensorTy.getElementType(), /*allowXF32=*/false,
-        /*preserveBF16=*/false);
+        /*preserveBF16=*/false, /*isConstant=*/ false, /*isSparseDot=*/ true);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepBK, kWidth, kBase,
         bTensorTy.getElementType(), /*allowXF32=*/false,
-        /*preserveBF16=*/false);
+        /*preserveBF16=*/false, /*isConstant=*/ false, /*isSparseDot=*/ true);
 
     // There are 1/8 as many elements on the K-dim for the metadata layout.
     // 3. kBase: the number of elements each thread holds for a single mfma
