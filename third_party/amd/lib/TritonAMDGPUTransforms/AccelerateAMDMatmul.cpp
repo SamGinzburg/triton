@@ -1375,9 +1375,14 @@ public:
     case ISAFamily::CDNA2:
     case ISAFamily::CDNA3:
       patterns
-          .add<::BlockedToMFMA, ::ScaledBlockedToMFMA, ::SparseBlockedToMFMA>(
+          .add<::BlockedToMFMA, ::ScaledBlockedToMFMA>(
               context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
               /*benefit=*/2);
+      patterns
+          .add<::SparseBlockedToMFMA>(
+              context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
+              /*benefit=*/2);
+
       break;
     case ISAFamily::RDNA3:
       patterns.add<::BlockedToWMMA>(context, getWmmaVersion(archGenerationName),

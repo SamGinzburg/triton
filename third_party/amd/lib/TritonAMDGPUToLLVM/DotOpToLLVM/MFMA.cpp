@@ -890,9 +890,10 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     // Each thread will load 1 i32 metadata value per SMFMA
     // We pack the values along the K-Dim
+    unsigned long adjustKPack = kWidth / kBase;
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        packedAMeta, numRepB, numRepM, std::max((unsigned long)(numRepBK / 2), 1ul),
-        /*kWidth=*/1ul, /*kBase=*/1ul,
+        packedAMeta, numRepB, numRepM, std::max((unsigned long)(numRepBK / 4), 1ul),
+        /*kWidth=*/std::max(adjustKPack / 2, 1ul), /*kBase=*/1ul,
         i32_ty, /*allowXF32=*/false,
         /*preserveBF16=*/false);
 
@@ -908,7 +909,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     Value firstMfma;
 
-    auto generatedOp = 0;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
     for (int b = 0; b < numRepB; ++b) {
       for (int m = 0; m < numRepM; ++m) {
@@ -926,7 +926,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           for (int k = 0; k < numRepBK; k++) {
             printf("k value encountered: %d\n", k);
             for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
-
+              printf("kPack encountered: %d\n", kPack);
               // TODO: transposed mfma layouts don't work with sparse_dot
               // This is because the A-input is always the sparse one, so
               // you cannot just swap A, B.
@@ -952,21 +952,21 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // with the same shape as Every group of 4 K values shares
               // Each lane has K=8 values (4 indicies per-lane---8 bits), so
               // each VGPR from aMeta holds 4 sets.
-              auto values = operandAMeta[kPack][{b, m, k / 4}];
+              // The kPack is 2 instead of 4, because we packed the i16 values here.
+              auto values = operandAMeta[kPack / 2][{b, m, k / 4}];
               auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
 
               Value abid = tb.i32_val(k % 4);
               acc = generateSparseMFMAOp(
                   intrinsicName,
                   operandA[kPack]
-                          [{b, m, k}], // Loads 2 values for f16/bf16 inputs
+                          [{b, m, k}],
                   operandB[kPack]
-                          [{b, n, k}], // Loads 4 values for f16/bf16 inputs
+                          [{b, n, k}],
                   acc,
                   metadata,
                   abid);
 
-              generatedOp++;
               if (!firstMfma)
                 firstMfma = acc;
             }
