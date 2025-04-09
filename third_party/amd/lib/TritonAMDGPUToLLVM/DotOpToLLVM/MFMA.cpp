@@ -866,8 +866,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     printf("kWidthSparse: %d\n", kWidthSparse);
     printf("kBase: %d\n", kWidth);
 
-    assert(aMetaTensorTy.getElementType() == i16_ty && "aMeta elems must be i16");
-
+    assert(aMetaTensorTy.getElementType() == i16_ty &&
+           "aMeta elems must be i16");
 
     auto numMFMAs = numRepB * numRepM * numRepN * numRepBK;
     auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
@@ -877,14 +877,13 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       auto upperI16 = tb.bitcast(aMetaElems[elemIdx + 1], i16_ty);
       auto lowerI16 = tb.bitcast(aMetaElems[elemIdx], i16_ty);
       auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
-      Value packedAMeta =
-          tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
+      Value packedAMeta = tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
       aMetaPacked[elemIdx / 2] = packedAMeta;
     }
 
     auto ty = LLVM::LLVMStructType::getLiteral(
-          rewriter.getContext(), SmallVector<Type>(aMetaPacked.size(), i32_ty));
-    //Type ty = vec_ty(i32_ty, aMetaPacked.size());
+        rewriter.getContext(), SmallVector<Type>(aMetaPacked.size(), i32_ty));
+    // Type ty = vec_ty(i32_ty, aMetaPacked.size());
     Value packedAMeta =
         packLLElements(loc, typeConverter, aMetaPacked, rewriter, ty);
 
@@ -892,9 +891,10 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // We pack the values along the K-Dim
     unsigned long adjustKPack = kWidth / kBase;
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        packedAMeta, numRepB, numRepM, std::max((unsigned long)(numRepBK / 2), 1ul),
-        /*kWidth=*/std::max(adjustKPack / 2, 1ul), /*kBase=*/1ul,
-        i32_ty, /*allowXF32=*/false,
+        packedAMeta, numRepB, numRepM,
+        std::max((unsigned long)(numRepBK / 2), 1ul),
+        /*kWidth=*/std::max(adjustKPack / 2, 1ul), /*kBase=*/1ul, i32_ty,
+        /*allowXF32=*/false,
         /*preserveBF16=*/false);
 
     auto dstElemTy = dTensorTy.getElementType();
@@ -947,7 +947,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
               // NVIDIA takes in i16 values(?), while smfmac expects i32. We can
               // pack the i16 vals together.
-              // TODO: sync up with the nvidia side and settle on accepting I32s instead (packed by user)
+              // TODO: sync up with the nvidia side and settle on accepting I32s
+              // instead (packed by user)
 
               // kPack / 2 because we are packing 2 i16 values together
               auto values = operandAMeta[kPack / 2][{b, m, k / 4}];
@@ -955,14 +956,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
               Value abid = tb.i32_val(k % 4);
               acc = generateSparseMFMAOp(
-                  intrinsicName,
-                  operandA[kPack]
-                          [{b, m, k}],
-                  operandB[kPack]
-                          [{b, n, k}],
-                  acc,
-                  metadata,
-                  abid);
+                  intrinsicName, operandA[kPack][{b, m, k}],
+                  operandB[kPack][{b, n, k}], acc, metadata, abid);
 
               if (!firstMfma)
                 firstMfma = acc;
@@ -972,7 +967,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           acc = reduceSubBlocks(subBlocks, acc);
           // We obtained kDimOperandSize from the A input, which is 2:4 sparse
           adjustAccForSmallKDim(fc, acc, dstElemTy, b, m, n, numRepM, numRepN,
-                                kDimInstrSize, kDimOperandSize * 2, elemsPerVec);
+                                kDimInstrSize, kDimOperandSize * 2,
+                                elemsPerVec);
         }
       }
     }

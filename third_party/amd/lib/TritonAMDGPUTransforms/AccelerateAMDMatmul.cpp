@@ -1374,15 +1374,13 @@ public:
     case ISAFamily::CDNA1:
     case ISAFamily::CDNA2:
     case ISAFamily::CDNA3:
-      patterns
-          .add<::BlockedToMFMA, ::ScaledBlockedToMFMA>(
-              context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
-              /*benefit=*/2);
+      patterns.add<::BlockedToMFMA, ::ScaledBlockedToMFMA>(
+          context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
+          /*benefit=*/2);
       // kPack of 2 ensures that we can pack 2 i16 values into an i32 later
-      patterns
-          .add<::SparseBlockedToMFMA>(
-              context, getMfmaVersion(isaFamily), matrixInstructionSize, /*kPack=*/2,
-              /*benefit=*/2);
+      patterns.add<::SparseBlockedToMFMA>(context, getMfmaVersion(isaFamily),
+                                          matrixInstructionSize, /*kPack=*/2,
+                                          /*benefit=*/2);
 
       break;
     case ISAFamily::RDNA3:
