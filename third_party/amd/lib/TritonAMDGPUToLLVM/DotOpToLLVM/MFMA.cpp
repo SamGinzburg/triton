@@ -954,10 +954,10 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // instead (packed by user)
 
               // kPack / 2 because we are packing 2 i16 values together
-              auto values = operandAMeta[kPack / 2][{b, m, k}];
+              auto values = operandAMeta[kPack / 2][{b, m, k / 4}];
               auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
 
-              Value abid = tb.i32_val(abidSelector % 4);
+              Value abid = tb.i32_val(k % 4);
               acc = generateSparseMFMAOp(
                   intrinsicName, operandA[kPack][{b, m, k}],
                   operandB[kPack][{b, n, k}], acc, metadata, abid);
