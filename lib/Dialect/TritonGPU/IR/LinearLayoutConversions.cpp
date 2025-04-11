@@ -709,8 +709,8 @@ AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   } else {
     assert(getMDim() == 16);
     tileLayout = LinearLayout(
-      {{kRegister, {{0, 8}}},
-       {kLane, {{1, 0},/*gap*/ {0, 0}, {0, 1}, {0, 2}, {0, 4}}}},
+      {{kRegister, {{0, 1}}},
+       {kLane, {{0, 1}, {0, 2}, {0, 4}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
 
     /*
