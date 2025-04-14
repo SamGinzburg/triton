@@ -1377,7 +1377,10 @@ public:
       patterns.add<::BlockedToMFMA, ::ScaledBlockedToMFMA>(
           context, getMfmaVersion(isaFamily), matrixInstructionSize, kPack,
           /*benefit=*/2);
-      // kPack of 2 ensures that we can pack 2 i16 values into an i32 later
+
+      // For 16-bit inputs, smfmac requires 8-bits per-lane for one SMFMA
+      // So kPack must be 2, since the metadata (compression) matrix is of type i16.
+      // It has to be be i16 to be compatible with the NVIDIA backend.
       patterns.add<::SparseBlockedToMFMA>(context, getMfmaVersion(isaFamily),
                                           matrixInstructionSize, /*kPack=*/2,
                                           /*benefit=*/2);
