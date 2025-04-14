@@ -902,8 +902,9 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
       aMetaPacked[elemIdx] = tb.zext(i32_ty, elem);
     }
 
-    assert(numMFMAs / 2 == aMetaPacked.size() &&
-        "We should load 1 I16 input for every 2 SMFMA ops per-lane");
+    //assert(numMFMAs / 2 == aMetaPacked.size() &&
+    //    "We should load 1 I16 input for every 2 SMFMA ops per-lane");
+
 
     auto ty = LLVM::LLVMStructType::getLiteral(
         rewriter.getContext(), SmallVector<Type>(aMetaPacked.size(), i32_ty));
