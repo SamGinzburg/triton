@@ -883,9 +883,13 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     //SmallVector<Value> aMetaPacked(aMetaElems.size());
     SmallVector<Value> aMetaPacked;
 
-    for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += 1) {
+    // How many elems do we need?
+    // e.g., If we have 4 elems per thread, but need 2, the stride should be 2.
+    auto elemsStride = aMetaElems.size() / (numRepB * numRepM * numRepBK);
+
+    for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += elemsStride) {
       printf ("elemIdx in loop: %d\n", elemIdx);
-      auto elem = tb.bitcast(aMetaElems[elemIdx], i16_ty);
+      auto elem = tb.bitcast(aMetaElems[elemIdx % aMetaElems.size()], i16_ty);
       //aMetaPacked[elemIdx] = tb.zext(i32_ty, elem);
       aMetaPacked.push_back(tb.zext(i32_ty, elem));
     }
