@@ -879,46 +879,38 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     bool checkType2Byte = (aTensorTy.getElementType() == bf16_ty) || (aTensorTy.getElementType() == f16_ty);
     assert (kPack == 2 && checkType2Byte && "We should load 16 bits of metadata per lane for kPack == 2 for FP16/BF16 inputs");
 
-    auto numMFMAs = numRepB * numRepM * numRepN * numRepBK * kPack;
-    printf ("numMFMAs: %d\n", numMFMAs);
-
     auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
-    /*
-    SmallVector<Value> aMetaPacked(std::max(aMetaElems.size() / 2, 1ul));
-
-    for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += 2) {
-      auto upperI16 = tb.bitcast(aMetaElems[elemIdx + 1], i16_ty);
-      auto lowerI16 = tb.bitcast(aMetaElems[elemIdx], i16_ty);
-      auto upper = tb.shl(tb.zext(i32_ty, upperI16), tb.i32_val(16));
-      Value packedAMeta = tb.or_(i32_ty, upper, tb.zext(i32_ty, lowerI16));
-      aMetaPacked[elemIdx / 2] = packedAMeta;
-    }
-    */
-    SmallVector<Value> aMetaPacked(aMetaElems.size());
+    //SmallVector<Value> aMetaPacked(aMetaElems.size());
+    SmallVector<Value> aMetaPacked;
 
     for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += 1) {
       printf ("elemIdx in loop: %d\n", elemIdx);
       auto elem = tb.bitcast(aMetaElems[elemIdx], i16_ty);
-      aMetaPacked[elemIdx] = tb.zext(i32_ty, elem);
+      //aMetaPacked[elemIdx] = tb.zext(i32_ty, elem);
+      aMetaPacked.push_back(tb.zext(i32_ty, elem));
     }
 
-    //assert(numMFMAs / 2 == aMetaPacked.size() &&
-    //    "We should load 1 I16 input for every 2 SMFMA ops per-lane");
-
+    auto aMetaShape = aMetaTensorTy.getShape();
+    auto numMFMAs = numRepB * numRepM * numRepN * numRepBK * kPack;
+    printf ("numMFMAs: %d\n", numMFMAs);
+    // TODO: fix this assert to account for numWarps
+    // TODO: num warps breaking this??
+    //assert(aMetaPacked.size() == aMetaShape[1] &&
+    //    "We should load 1 I16 input for every 2 SMFMA ops per-lane on the K-Dim");
 
     auto ty = LLVM::LLVMStructType::getLiteral(
         rewriter.getContext(), SmallVector<Type>(aMetaPacked.size(), i32_ty));
-    // Type ty = vec_ty(i32_ty, aMetaPacked.size());
     Value packedAMeta =
         packLLElements(loc, typeConverter, aMetaPacked, rewriter, ty);
 
-    // Each thread will load 1 i32 metadata value per SMFMA
-    // We pack the values along the K-Dim
     unsigned long adjustKPack = kWidth / kBase;
+
+    // The math for kWidth and kBase are wrong, since we are loading 1 value for
+    // every 2 smfmac ops.
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
         packedAMeta, numRepB, numRepM,
         std::max((unsigned long)(numRepBK), 1ul),
-        /*kWidth=*/1ul, /*kBase=*/1ul, i32_ty,
+        /*kWidth=*/1u, /*kBase=*/1ul, i32_ty,
         /*allowXF32=*/false,
         /*preserveBF16=*/false);
 
@@ -978,10 +970,10 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
               // We fix kPack==2 for bf16/fp16 inputs, in reality we only load 1 element per thread
               // that is shared between two sparse mfma operations.
-              auto values = operandAMeta[kPack / 2][{b, m, k}];
+              auto values = operandAMeta[0][{b, m, k}];
               auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
 
-              Value abid = tb.i32_val(kPack % 4);
+              Value abid = tb.i32_val(kPack % 2);
               acc = generateSparseMFMAOp(
                   intrinsicName, operandA[kPack][{b, m, k}],
                   operandB[kPack][{b, n, k}], acc, metadata, abid);

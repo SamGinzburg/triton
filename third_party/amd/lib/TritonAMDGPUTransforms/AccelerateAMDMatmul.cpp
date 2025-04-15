@@ -974,7 +974,6 @@ public:
     // This is because we cannot swap the A, B inputs, as only the A input can
     // be sparse.
     bool isTransposed = false;
-
     mfmaEnc = ttg::AMDMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
@@ -988,6 +987,8 @@ public:
         /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
 
     // The layout for aMeta
+    // TODO: can this be improved? Changing this seems to break things atm
+    // SmallVector<unsigned, 2> warpsPerTileCompression = {1, static_cast<unsigned>(numWarps)};
     compressionMfmaEnc = ttg::AMDCompressionMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
