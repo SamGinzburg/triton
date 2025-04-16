@@ -244,6 +244,8 @@ def compress(A):
     assert len(nonzero_indices) == len(flat) // 2
 
     metas = []
+    #[Shucai:] The 4 here should be 2 and there are only 8 bits can be
+    # used in each meta element
     for outerIdx in range(0, len(meta_nibbles), 4):
         meta = 0
         meta |= meta_nibbles[outerIdx + 0] << 0
@@ -253,6 +255,7 @@ def compress(A):
         metas.append(meta)
 
     aSparse = (A.flatten()[nonzero_indices]).reshape(A.shape[0], A.shape[1] // 2)
+    # [Shucai:] I thik the aMeta shape should be (A.shape[0], A.shape[1] // 8)
     aMeta = torch.tensor(np.array(metas, dtype=np.uint16).astype(np.int16)).reshape(
         A.shape[0], A.shape[1] // 16
     )
