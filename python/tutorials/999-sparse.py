@@ -37,13 +37,26 @@ def get_autotune_config():
                                     num_warps=num_warps,
                                 ),
                             )
+    # configs = [
+    #     triton.Config(
+    #         {
+    #             "BLOCK_SIZE_M": 16,
+    #             "BLOCK_SIZE_N": 32,
+    #             "BLOCK_SIZE_K": 128,
+    #             "GROUP_SIZE_M": 1,
+    #             "matrix_instr_nonkdim": 16,
+    #         },
+    #         num_stages=1,
+    #         num_warps=2,
+    #     ),
+    # ]
     return configs
 
 
-@triton.autotune(
-    configs=get_autotune_config(),
-    key=["M", "N", "K"],
-)
+# @triton.autotune(
+#     configs=get_autotune_config(),
+#     key=["M", "N", "K"],
+# )
 @triton.heuristics(
     values={
         "EVEN_K": lambda args: args["K"] % args["BLOCK_SIZE_K"] == 0,
@@ -262,7 +275,7 @@ def compress(A):
     return aSparse.cuda(), aMeta.cuda()
 
 
-def matmul(aSparse, aMeta, b):
+def matmul(aSparse, aMeta, b, config):
     # Check constraints.
     assert aSparse.shape[1] * 2 == b.shape[0], "Incompatible dimensions"
     assert aMeta.shape[1] * 16 == b.shape[0], "Incompatible dimensions"
@@ -272,12 +285,17 @@ def matmul(aSparse, aMeta, b):
     K, N = b.shape
 
     # Allocates output.
-    c = torch.empty((M, N), device=a.device, dtype=dtype)
+    c = torch.empty((M, N), device=b.device, dtype=b.dtype)
     # 1D launch kernel where each block gets its own program.
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
 
+    block_m = config.kwargs['BLOCK_SIZE_M']
+    block_n = config.kwargs['BLOCK_SIZE_N']
+    block_k = config.kwargs['BLOCK_SIZE_K']
+    group_m = config.kwargs['GROUP_SIZE_M']
+    nonk_dim = config.kwargs['matrix_instr_nonkdim']
     matmul_kernel_sparse[grid](
         aSparse,
         b,
@@ -295,71 +313,81 @@ def matmul(aSparse, aMeta, b):
         aMeta.stride(0),
         aMeta.stride(1),
         USE_BF16=False, #dtype is torch.bfloat16,
+        BLOCK_SIZE_M = block_m,
+        BLOCK_SIZE_N = block_n,
+        BLOCK_SIZE_K = block_k,
+        GROUP_SIZE_M = group_m,
+        matrix_instr_nonkdim = nonk_dim,
+        num_stages = config.num_stages,
+        num_warps = config.num_warps,
     )
+
     return c
 
-torch.manual_seed(42)
-test_dim = 4096
-dtype = torch.float16
-#dtype = torch.bfloat16
+def test_sparse_matrix():
+    torch.manual_seed(42)
+    test_dim = 4096
+    dtype = torch.float16
+    #dtype = torch.bfloat16
 
-a = make_sparse(torch.randn((test_dim, test_dim), device="cuda", dtype=dtype))
-# a = make_sparse(torch.ones((test_dim, test_dim), device="cuda", dtype=dtype))
-print("Running sparse compression in Python... this can be quite slow, be patient!")
-aSparse, aMeta = compress(a)
-b = torch.randn((test_dim, test_dim), device="cuda", dtype=dtype)
-# b = torch.arange(np.prod((test_dim, test_dim)), device="cuda", dtype=torch.float32) % 1024
-# b = b.reshape(test_dim, test_dim)
-# b = torch.ones((test_dim, test_dim), device="cuda", dtype=dtype)
+    a = make_sparse(torch.randn((test_dim, test_dim), device="cuda", dtype=dtype))
+    # a = make_sparse(torch.ones((test_dim, test_dim), device="cuda", dtype=dtype))
+    print("Running sparse compression in Python... this can be quite slow, be patient!")
+    aSparse, aMeta = compress(a)
+    b = torch.randn((test_dim, test_dim), device="cuda", dtype=dtype)
+    # b = torch.arange(np.prod((test_dim, test_dim)), device="cuda", dtype=torch.float32) % 1024
+    # b = b.reshape(test_dim, test_dim)
+    # b = torch.ones((test_dim, test_dim), device="cuda", dtype=dtype)
 
-#b = torch.randn((test_dim, test_dim), device="cuda", dtype=dtype) % 16
-#b = b.to(dtype)
-"""
-for row in range((test_dim)):
-    for col in range((test_dim)):
-        b[row][col] = (row * col) / 1024
-"""
-#b = torch.ones((test_dim, test_dim), device="cuda", dtype=dtype)
+    #b = torch.randn((test_dim, test_dim), device="cuda", dtype=dtype) % 16
+    #b = b.to(dtype)
+    """
+    for row in range((test_dim)):
+        for col in range((test_dim)):
+            b[row][col] = (row * col) / 1024
+    """
+    #b = torch.ones((test_dim, test_dim), device="cuda", dtype=dtype)
 
-print (a, b)
-print("Autotuning... set TRITON_PRINT_AUTOTUNING=1 to see logs here...")
-print ("aMeta: ", aMeta)
-
-
-"""
-count  =0
-for row in aMeta:
-    if count == 2:
-        break
-    hex_values = [hex(x.item()) for x in row]
-    print("Hexadecimal values:", hex_values)
-    count += 1
-"""
-
-triton_output = matmul(aSparse, aMeta, b)
-torch_output = torch.matmul(a, b)
-
-#triton_output = triton_output.to(dtype)
-#torch_output = torch_output.to(dtype)
-
-if torch.allclose(triton_output, torch_output, atol=1e-3, rtol=1e-3):
-    print("Correctness: Triton and Torch match! ✅")
-    print ("Triton output: ", triton_output)
-    print ("torch output: ", torch_output)
-else:
-    print("Correctness: Triton and Torch differ! ❌")
-    print ("Triton output: ", triton_output)
-    print ("torch output: ", torch_output)
-    print (triton_output - torch_output)
-    #diff = triton_output - torch_output
-    #for val in diff:
-    #    print (val)
-
-ms = triton.testing.do_bench(lambda: matmul(aSparse, aMeta, b))
-flops = 2 * test_dim * test_dim * test_dim * 1e-12 / (ms * 1e-3)
-print(f"Perf: {flops} TFLOPS")
+    print (a, b)
+    print("Autotuning... set TRITON_PRINT_AUTOTUNING=1 to see logs here...")
+    print ("aMeta: ", aMeta)
 
 
-ms_torch = triton.testing.do_bench(lambda: torch.matmul(a, b))
-flops = 2 * test_dim * test_dim * test_dim * 1e-12 / (ms_torch * 1e-3)
-print(f"Perf (torch): {flops} TFLOPS")
+    """
+    count  =0
+    for row in aMeta:
+        if count == 2:
+            break
+        hex_values = [hex(x.item()) for x in row]
+        print("Hexadecimal values:", hex_values)
+        count += 1
+    """
+
+    torch_output = torch.matmul(a, b)
+
+    for config in get_autotune_config():
+        triton_output = matmul(aSparse, aMeta, b, config)
+        print(f"config = {config}")
+        if torch.allclose(triton_output, torch_output, atol=1e-3, rtol=1e-3):
+            print("PASSED: Triton and Torch match! ✅")
+            # print ("Triton output: ", triton_output)
+            # print ("torch output: ", torch_output)
+        else:
+            print("FAILED: Triton and Torch differ! ❌")
+            print ("Triton output: ", triton_output)
+            print ("torch output: ", torch_output)
+            print (triton_output - torch_output)
+
+
+    print(f"report best performance")
+
+    ms = triton.testing.do_bench(lambda: matmul(aSparse, aMeta, b))
+    flops = 2 * test_dim * test_dim * test_dim * 1e-12 / (ms * 1e-3)
+    print(f"Triton Perf: {flops} TFLOPS")
+
+
+    ms_torch = triton.testing.do_bench(lambda: torch.matmul(a, b))
+    flops = 2 * test_dim * test_dim * test_dim * 1e-12 / (ms_torch * 1e-3)
+    print(f"Perf (torch): {flops} TFLOPS")
+
+test_sparse_matrix()

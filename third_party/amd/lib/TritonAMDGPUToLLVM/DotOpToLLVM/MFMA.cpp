@@ -453,9 +453,9 @@ struct DotOpMFMAConversionHelper {
           }
           Value rawElems = tb.undef(ty);
           for (int k = 0; k < kWidth; ++k) {
-            printf("elems len: %d\n", elems.size());
-            printf("idx into elems: %d\n",
-                   kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k);
+            // printf("elems len: %ld\n", elems.size());
+            // printf("idx into elems: %d\n",
+            //        kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k);
 
             auto val =
                 elems[kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k];
@@ -864,9 +864,9 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     //    instruction.
     // 1. kWidth: the number of elements each thread loads from shared memory in
     //    preparation for mfma instructions.
-    printf("numRepBK: %d\n", numRepBK);
-    printf("kWidthSparse: %d\n", kWidthSparse);
-    printf("kBase: %d\n", kWidth);
+    // printf("numRepBK: %ld\n", numRepBK);
+    // printf("kWidthSparse: %d\n", kWidthSparse);
+    // printf("kBase: %d\n", kWidth);
 
     assert(aMetaTensorTy.getElementType() == i16_ty &&
            "aMeta elems must be i16");
@@ -884,7 +884,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     SmallVector<Value> aMetaPacked;
 
     for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += 1) {
-      printf ("elemIdx in loop: %d\n", elemIdx);
+      // printf ("elemIdx in loop: %d\n", elemIdx);
       auto elem = tb.bitcast(aMetaElems[elemIdx], i16_ty);
       //aMetaPacked[elemIdx] = tb.zext(i32_ty, elem);
       aMetaPacked.push_back(tb.zext(i32_ty, elem));
@@ -892,7 +892,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     auto aMetaShape = aMetaTensorTy.getShape();
     auto numMFMAs = numRepB * numRepM * numRepN * numRepBK * kPack;
-    printf ("numMFMAs: %d\n", numMFMAs);
     // TODO: fix this assert to account for numWarps
     // TODO: num warps breaking this??
     //assert(aMetaPacked.size() == aMetaShape[1] &&
@@ -909,7 +908,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // every 2 smfmac ops.
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
         packedAMeta, numRepB, numRepM,
-        std::max((unsigned long)(numRepBK), 1ul),
+        std::max((unsigned long)(numRepBK/2), 1ul),
         /*kWidth=*/1u, /*kBase=*/1ul, i32_ty,
         /*allowXF32=*/false,
         /*preserveBF16=*/false);
@@ -942,9 +941,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           acc = zeroAuxiliarBlocks(subBlocks, acc);
 
           for (int k = 0; k < numRepBK; k++) {
-            printf("k value encountered: %d\n", k);
             for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
-              printf("kPack encountered: %d\n", kPack);
               // TODO: transposed mfma layouts don't work with sparse_dot
               // This is because the A-input is always the sparse one, so
               // you cannot just swap A, B.
@@ -970,9 +967,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
               // We fix kPack==2 for bf16/fp16 inputs, in reality we only load 1 element per thread
               // that is shared between two sparse mfma operations.
-              auto values = operandAMeta[0][{b, m, k}];
+              auto values = operandAMeta[0][{b, m, k / 2}];
               auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
-
               Value abid = tb.i32_val(kPack % 2);
               acc = generateSparseMFMAOp(
                   intrinsicName, operandA[kPack][{b, m, k}],
@@ -980,8 +976,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
               if (!firstMfma)
                 firstMfma = acc;
-
-              abidSelector++;
+                abidSelector++;
             }
           }
 
