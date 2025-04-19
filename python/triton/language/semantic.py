@@ -1623,7 +1623,8 @@ def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
     # TODO: fix this
     print("acc", acc)
     print("lhs_meta", lhs_meta)
-    assert acc is None, "AMD sparse dot does not support fast acc"
+
+    # assert builder.codegen_fns.get("sparse_dot_acc") is not None, "On AMD GPUs, the accumulator cannot be passed as an argument. Only `acc += tl.sparse_dot(A, B, aMeta)` is supported."
 
     M = lhs.type.shape[-2]
     N = rhs.type.shape[-1]

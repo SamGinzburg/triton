@@ -17,6 +17,10 @@ def get_min_dot_size(target: GPUTarget):
     # not supported natively by matrix core units.
     return lambda lhs_type, rhs_type: (1, 1, 1)
 
+# This is always False on AMD targets
+# This is because on AMD, sparse dot ops cannot pass the accumulator as an argument to the sparse MFMA instruction
+def sparse_dot_acc(target: GPUTarget):
+    return False
 
 def is_pingpong_schedule_enabled(arch):
     default = "1" if arch == "gfx942" else "0"

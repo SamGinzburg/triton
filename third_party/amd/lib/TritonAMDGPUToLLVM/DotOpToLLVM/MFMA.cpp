@@ -885,12 +885,13 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     // How many elems do we need?
     // e.g., If we have 4 elems per thread, but need 2, the stride should be 2.
-    auto elemsStride = aMetaElems.size() / (numRepB * numRepM * numRepBK);
+    auto elemStride = std::max(aMetaElems.size() / (numRepB * numRepM * numRepBK), 1ul);
 
-    for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += elemsStride) {
+    assert (elemStride >= 1 && "Computed elemStride should be positive");
+
+    for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += elemStride) {
       printf ("elemIdx in loop: %d\n", elemIdx);
-      auto elem = tb.bitcast(aMetaElems[elemIdx % aMetaElems.size()], i16_ty);
-      //aMetaPacked[elemIdx] = tb.zext(i32_ty, elem);
+      auto elem = tb.bitcast(aMetaElems[elemIdx], i16_ty);
       aMetaPacked.push_back(tb.zext(i32_ty, elem));
     }
 
@@ -984,8 +985,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
               if (!firstMfma)
                 firstMfma = acc;
-
-              abidSelector++;
             }
           }
 
