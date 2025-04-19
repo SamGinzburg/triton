@@ -885,7 +885,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     // How many elems do we need?
     // e.g., If we have 4 elems per thread, but need 2, the stride should be 2.
-    auto elemStride = std::max(aMetaElems.size() / (numRepB * numRepM * numRepBK), 1ul);
+    auto elemStride = aMetaElems.size() / (numRepB * numRepM * numRepBK);
 
     assert (elemStride >= 1 && "Computed elemStride should be positive");
 

@@ -703,7 +703,7 @@ AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   // sparse MFMA ops. This is because only the A input can be sparse.
   if (getMDim() == 32) {
     tileLayout = LinearLayout(
-      {{kRegister, {{0, 0}}},
+      {{kRegister, {{0, 0}, {0, 0}}},
        {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {1, 0}, {2, 0}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
   } else {
