@@ -29,6 +29,7 @@ def min_dot_size(target: GPUTarget):
 
     return check_dot_compatibility
 
+
 @functools.lru_cache()
 def _path_to_binary(binary: str):
     binary += sysconfig.get_config_var("EXE")

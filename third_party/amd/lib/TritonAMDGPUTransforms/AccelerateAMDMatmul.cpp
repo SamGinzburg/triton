@@ -988,7 +988,8 @@ public:
 
     // The layout for aMeta
     // TODO: can this be improved? Changing this seems to break things atm
-    // SmallVector<unsigned, 2> warpsPerTileCompression = {1, static_cast<unsigned>(numWarps)};
+    // SmallVector<unsigned, 2> warpsPerTileCompression = {1,
+    // static_cast<unsigned>(numWarps)};
     compressionMfmaEnc = ttg::AMDCompressionMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
@@ -1386,8 +1387,8 @@ public:
           /*benefit=*/2);
 
       // For 16-bit inputs, smfmac requires 8-bits per-lane for one SMFMA
-      // So kPack must be 2, since the metadata (compression) matrix is of type i16.
-      // It has to be be i16 to be compatible with the NVIDIA backend.
+      // So kPack must be 2, since the metadata (compression) matrix is of type
+      // i16. It has to be be i16 to be compatible with the NVIDIA backend.
       patterns.add<::SparseBlockedToMFMA>(context, getMfmaVersion(isaFamily),
                                           matrixInstructionSize, /*kPack=*/2,
                                           /*benefit=*/2);

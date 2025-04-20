@@ -437,7 +437,8 @@ struct DotOpMFMAConversionHelper {
   /// appropriate for mfma instructions
   virtual SmallVector<ValueTable> getValuesFromDotOperandLayoutStruct(
       Value value, int batch, int n0, int n1, int kWidth, int kBase, Type type,
-      bool allowXF32, bool preserveBF16, bool isConstantScale = false, bool isSparseDot = false) const {
+      bool allowXF32, bool preserveBF16, bool isConstantScale = false,
+      bool isSparseDot = false) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
     auto elems = unpackLLElements(loc, value, rewriter);
     int kpack = kWidth / kBase;
@@ -853,11 +854,11 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto operandA = getValuesFromDotOperandLayoutStruct(
         loadedA, numRepB, numRepM, numRepAK, kWidthSparse, kBase / 2,
         aTensorTy.getElementType(), /*allowXF32=*/false,
-        /*preserveBF16=*/false, /*isConstant=*/ false, /*isSparseDot=*/ true);
+        /*preserveBF16=*/false, /*isConstant=*/false, /*isSparseDot=*/true);
     auto operandB = getValuesFromDotOperandLayoutStruct(
         loadedB, numRepB, numRepN, numRepBK, kWidth, kBase,
         bTensorTy.getElementType(), /*allowXF32=*/false,
-        /*preserveBF16=*/false, /*isConstant=*/ false, /*isSparseDot=*/ true);
+        /*preserveBF16=*/false, /*isConstant=*/false, /*isSparseDot=*/true);
 
     // There are 1/8 as many elements on the K-dim for the metadata layout.
     // 3. kBase: the number of elements each thread holds for a single mfma
@@ -871,37 +872,40 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     assert(aMetaTensorTy.getElementType() == i16_ty &&
            "aMeta elems must be i16");
 
-
     // Each 16b input smfmac (fp16/bf16) uses 8 bits per lane
     // So
 
     int kPack = kWidth / kBase;
-    bool checkType2Byte = (aTensorTy.getElementType() == bf16_ty) || (aTensorTy.getElementType() == f16_ty);
-    assert (kPack == 2 && checkType2Byte && "We should load 16 bits of metadata per lane for kPack == 2 for FP16/BF16 inputs");
+    bool checkType2Byte = (aTensorTy.getElementType() == bf16_ty) ||
+                          (aTensorTy.getElementType() == f16_ty);
+    assert(kPack == 2 && checkType2Byte &&
+           "We should load 16 bits of metadata per lane for kPack == 2 for "
+           "FP16/BF16 inputs");
 
     auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
-    //SmallVector<Value> aMetaPacked(aMetaElems.size());
+    // SmallVector<Value> aMetaPacked(aMetaElems.size());
     SmallVector<Value> aMetaPacked;
 
     // How many elems do we need?
     // e.g., If we have 4 elems per thread, but need 2, the stride should be 2.
     auto elemStride = aMetaElems.size() / (numRepB * numRepM * numRepBK);
 
-    assert (elemStride >= 1 && "Computed elemStride should be positive");
+    assert(elemStride >= 1 && "Computed elemStride should be positive");
 
     for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += elemStride) {
-      printf ("elemIdx in loop: %d\n", elemIdx);
+      printf("elemIdx in loop: %d\n", elemIdx);
       auto elem = tb.bitcast(aMetaElems[elemIdx], i16_ty);
       aMetaPacked.push_back(tb.zext(i32_ty, elem));
     }
 
     auto aMetaShape = aMetaTensorTy.getShape();
     auto numMFMAs = numRepB * numRepM * numRepN * numRepBK * kPack;
-    printf ("numMFMAs: %d\n", numMFMAs);
+    printf("numMFMAs: %d\n", numMFMAs);
     // TODO: fix this assert to account for numWarps
     // TODO: num warps breaking this??
-    //assert(aMetaPacked.size() == aMetaShape[1] &&
-    //    "We should load 1 I16 input for every 2 SMFMA ops per-lane on the K-Dim");
+    // assert(aMetaPacked.size() == aMetaShape[1] &&
+    //    "We should load 1 I16 input for every 2 SMFMA ops per-lane on the
+    //    K-Dim");
 
     auto ty = LLVM::LLVMStructType::getLiteral(
         rewriter.getContext(), SmallVector<Type>(aMetaPacked.size(), i32_ty));
@@ -913,8 +917,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // The math for kWidth and kBase are wrong, since we are loading 1 value for
     // every 2 smfmac ops.
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        packedAMeta, numRepB, numRepM,
-        std::max((unsigned long)(numRepBK), 1ul),
+        packedAMeta, numRepB, numRepM, std::max((unsigned long)(numRepBK), 1ul),
         /*kWidth=*/1u, /*kBase=*/1ul, i32_ty,
         /*allowXF32=*/false,
         /*preserveBF16=*/false);
@@ -973,8 +976,9 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // TODO: sync up with the nvidia side and settle on accepting I32s
               // instead (packed by user)
 
-              // We fix kPack==2 for bf16/fp16 inputs, in reality we only load 1 element per thread
-              // that is shared between two sparse mfma operations.
+              // We fix kPack==2 for bf16/fp16 inputs, in reality we only load 1
+              // element per thread that is shared between two sparse mfma
+              // operations.
               auto values = operandAMeta[0][{b, m, k}];
               auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
 
