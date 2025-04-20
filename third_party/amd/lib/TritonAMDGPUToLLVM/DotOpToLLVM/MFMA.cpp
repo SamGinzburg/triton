@@ -971,11 +971,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               //                    reg_idx, <-- aMeta, all the indicies are in
               //                    one VGPR 0, abid);
 
-              // NVIDIA takes in i16 values(?), while smfmac expects i32. We can
-              // pack the i16 vals together.
-              // TODO: sync up with the nvidia side and settle on accepting I32s
-              // instead (packed by user)
-
               // We fix kPack==2 for bf16/fp16 inputs, in reality we only load 1
               // element per thread that is shared between two sparse mfma
               // operations.
