@@ -305,6 +305,14 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
                            16, 8),
       TRITON_MFMA_SPARSE_v(3, 16, 16, bf16T, bf16T, smfmac_f32_16x16x32_bf16,
                            32, 8),
+      TRITON_MFMA_SPARSE_v(3, 16, 16, ocpFp8T, ocpFp8T, smfmac_f32_16x16x64_fp8_fp8, 64,
+                           16),
+      TRITON_MFMA_SPARSE_v(3, 32, 32, ocpFp8T, ocpFp8T, smfmac_f32_32x32x32_fp8_fp8, 32,
+                           16),
+      TRITON_MFMA_SPARSE_v(3, 16, 16, ocpBf8T, ocpBf8T, smfmac_f32_16x16x64_bf8_bf8, 64,
+                           16),
+      TRITON_MFMA_SPARSE_v(3, 32, 32, ocpBf8T, ocpBf8T, smfmac_f32_32x32x32_bf8_bf8, 32,
+                           16),
   };
 }
 
