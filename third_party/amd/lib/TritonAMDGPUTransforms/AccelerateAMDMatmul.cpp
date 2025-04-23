@@ -988,8 +988,7 @@ public:
 
     // The layout for aMeta
     // TODO: can this be improved? Changing this seems to break things atm
-    // SmallVector<unsigned, 2> warpsPerTileCompression = {1,
-    // static_cast<unsigned>(numWarps)};
+    // SmallVector<unsigned, 2> warpsPerTileCompression = {1, static_cast<unsigned>(numWarps)};
     compressionMfmaEnc = ttg::AMDCompressionMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,

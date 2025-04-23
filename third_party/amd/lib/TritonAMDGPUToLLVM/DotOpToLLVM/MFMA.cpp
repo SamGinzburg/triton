@@ -827,6 +827,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     assert(kWidthSparse * 2 == kWidth);
 
     const auto kDimInstrSize = mfmaLayout.getInstrShapeForOperand(kWidth, 0)[1];
+    printf ("kDimInstrSize: %d\n", kDimInstrSize);
 
     auto repA = sparseAMfmaLayout.getRepForOperand(aTensorTy.getShape(),
                                                    kWidthSparse, 0);
@@ -873,8 +874,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
            "aMeta elems must be i16");
 
     // Each 16b input smfmac (fp16/bf16) uses 8 bits per lane
-    // So
-
     int kPack = kWidth / kBase;
     bool checkType2Byte = (aTensorTy.getElementType() == bf16_ty) ||
                           (aTensorTy.getElementType() == f16_ty);
@@ -886,15 +885,18 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // SmallVector<Value> aMetaPacked(aMetaElems.size());
     SmallVector<Value> aMetaPacked;
 
+    auto sparseAElems = unpackLLElements(loc, loadedA, rewriter);
     // How many elems do we need?
     // e.g., If we have 4 elems per thread, but need 2, the stride should be 2.
     auto elemStride = aMetaElems.size() / (numRepB * numRepM * numRepBK);
+    //elemStride = 1ul;
+    //elemStride = std::max(elemStride, 1ul);
 
     assert(elemStride >= 1 && "Computed elemStride should be positive");
 
-    for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx += elemStride) {
+    for (auto elemIdx = 0; elemIdx < (numRepB * numRepM * numRepBK) * elemStride; elemIdx += elemStride) {
       printf("elemIdx in loop: %d\n", elemIdx);
-      auto elem = tb.bitcast(aMetaElems[elemIdx], i16_ty);
+      auto elem = tb.bitcast(aMetaElems[elemIdx % aMetaElems.size()], i16_ty);
       aMetaPacked.push_back(tb.zext(i32_ty, elem));
     }
 

@@ -701,6 +701,10 @@ AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
 
   // We don't need to support transposed layouts because we can't transpose
   // sparse MFMA ops. This is because only the A input can be sparse.
+
+  // Registers contain the 'K'-dimension
+  // Lane contains the 'M'-dimension
+
   if (getMDim() == 32) {
     tileLayout = LinearLayout(
       {{kRegister, {{0, 0}, {2, 0}}},
