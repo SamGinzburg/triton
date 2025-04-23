@@ -889,8 +889,11 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // How many elems do we need?
     // e.g., If we have 4 elems per thread, but need 2, the stride should be 2.
     auto elemStride = aMetaElems.size() / (numRepB * numRepM * numRepBK);
-    //elemStride = 1ul;
-    //elemStride = std::max(elemStride, 1ul);
+    // smfma32 is determined by the K-dim and has a stride of 1
+    if (kDimInstrSize == 32)
+      elemStride = 1;
+
+    printf ("elemStride: %d\n", elemStride);
 
     assert(elemStride >= 1 && "Computed elemStride should be positive");
 

@@ -706,9 +706,19 @@ AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
   // Lane contains the 'M'-dimension
 
   if (getMDim() == 32) {
+    // This layout is always row-major, of dim [M, K // 16]
+    // We have to construct the kRegister dim from the kSize
+    int32_t kSize = shape[rank - 1];
+    kSize = llvm::Log2_32(kSize) - 1;
+
+    std::vector<std::vector<int32_t>> registerBase;
+    for (int i = 0; i < kSize; i++) {
+      registerBase.push_back({2 * (i + 1), 0});
+    }
+
     tileLayout = LinearLayout(
-      {{kRegister, {{0, 0}, {2, 0}}},
-       {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {1, 0}}}},
+      {{kRegister, registerBase},
+       {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {0, 16}, {1, 0}, {0, 0}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
   } else {
     assert(getMDim() == 16);
