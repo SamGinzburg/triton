@@ -713,7 +713,7 @@ AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
 
     std::vector<std::vector<int32_t>> registerBase;
     for (int i = 0; i < kSize; i++) {
-      registerBase.push_back({2 * (i + 1), 0});
+      registerBase.push_back({1 << (i + 1), 0});
     }
 
     tileLayout = LinearLayout(
