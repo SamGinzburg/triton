@@ -975,9 +975,9 @@ public:
     // fp16/bf16 --> kPack needs to be 2
     // fp8/bf8 --> kPack needs to be 1
     assert (aElemTy == bElemTy && "For now, we only support sparse dot with the same A and B element type inputs");
-    int localKPack = 2;
+    int localKPack = 1;
     if (aElemTy.getIntOrFloatBitWidth() == 16)
-      localKPack = 1;
+      localKPack = 2;
 
     // We cannot support transposed MFMA layouts for 2:4 sparsity on AMD
     // This is because we cannot swap the A, B inputs, as only the A input can

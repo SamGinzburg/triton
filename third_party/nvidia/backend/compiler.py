@@ -1,7 +1,6 @@
 from triton.backends.compiler import BaseBackend, GPUTarget
 from triton._C.libtriton import ir, passes, llvm, nvidia
 from triton.runtime.errors import PTXASError
-
 from dataclasses import dataclass
 import functools
 from typing import Any, Dict, Tuple, Optional
@@ -29,6 +28,8 @@ def min_dot_size(target: GPUTarget):
 
     return check_dot_compatibility
 
+def get_supported_sparse_dot_dtypes(target: GPUTarget):
+    return lambda input_dtype: input_dtype.name in ("fp16", "bf16", "fp8e5", "fp8e4nv")
 
 @functools.lru_cache()
 def _path_to_binary(binary: str):
@@ -210,7 +211,8 @@ class CUDABackend(BaseBackend):
         codegen_fns = {
             "convert_custom_types":
             cuda.convert_custom_float8_sm80 if capability >= 80 else cuda.convert_custom_float8_sm70, "min_dot_size":
-            min_dot_size(self.target)
+            min_dot_size(self.target),
+            "get_sparse_dot_dtypes": get_supported_sparse_dot_dtypes(self.target),
         }
         return codegen_fns
 
