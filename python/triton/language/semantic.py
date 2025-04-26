@@ -1601,8 +1601,9 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optiona
 
 def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tensor, builder: ir.builder) -> tl.tensor:
     assert lhs.type.is_block() and rhs.type.is_block()
-    assert lhs.dtype in (tl.float16, tl.bfloat16), f"Unsupported lhs dtype {lhs.dtype}"
-    assert rhs.dtype in (tl.float16, tl.bfloat16), f"Unsupported rhs dtype {rhs.dtype}"
+    supported_sparse_dot_dtypes = (tl.float16, tl.bfloat16, tl.float8e5, tl.float8e4nv)
+    assert lhs.dtype in supported_sparse_dot_dtypes, f"Unsupported lhs dtype {lhs.dtype}"
+    assert rhs.dtype in supported_sparse_dot_dtypes, f"Unsupported rhs dtype {rhs.dtype}"
     assert lhs.dtype == rhs.dtype, f"Both operands must be same dtype. Got {lhs.dtype} and {rhs.dtype}"
 
     lhs_rank = len(lhs.shape)
@@ -1615,7 +1616,6 @@ def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
     assert lhs.shape[-2].value >= min_dot_size[0] and lhs.shape[-1].value >= min_dot_size[2] \
         and rhs.shape[-1].value >= min_dot_size[1], \
             f"Input shapes should have M >= {min_dot_size[0]}, N >= {min_dot_size[1]} and K >= {min_dot_size[2]}"
-    # TODO constraints for lhs_meta
 
     _0 = builder.get_fp32(0)
     ret_scalar_ty = tl.float32

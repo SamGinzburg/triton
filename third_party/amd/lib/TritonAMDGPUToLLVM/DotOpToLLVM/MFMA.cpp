@@ -323,6 +323,7 @@ struct DotOpMFMAConversionHelper {
     const int subBlocks =
         getNumSubmatrices(aTensorTy.getElementType(), mDim, nDim);
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
+    printf("elemsPerVec: %d\n", elemsPerVec);
 
     Value firstMfma;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
@@ -380,7 +381,7 @@ struct DotOpMFMAConversionHelper {
   /// kBase elements for each mfma instruction
   SmallVector<Value> extractOperands(Value rawElems, int kWidth, int kBase,
                                      Type type, bool preserveBF16,
-                                     bool isConstantScale = false) const {
+                                     bool isConstantScale = false, bool isSparseDot = false) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     int kpack = kWidth / kBase;
     SmallVector<Value> results;
@@ -416,16 +417,24 @@ struct DotOpMFMAConversionHelper {
             results.push_back(b.zext(i32_ty, b.bitcast(vec, i8_ty)));
           }
         }
-        if (4 == kBase)
-          // This is for int8 on pre- CDNA3 GPUs
-          results.push_back(b.bitcast(vec, i32_ty));
-        if (8 == kBase)
-          results.push_back(b.bitcast(vec, i64_ty));
-        if (16 == kBase)
-          // This is only for the operands of scaled mfma on CDNA4
-          results.push_back(b.bitcast(vec, vec_ty(i32_ty, 4)));
-        if (32 == kBase)
-          results.push_back(b.bitcast(vec, vec_ty(i32_ty, 8)));
+        if (isSparseDot) {
+          assert (kBase == 8 || kBase == 16 && "kBase can only be 8 or 16 for the FP8 / BF8 sparse dot case");
+          if (kBase == 8)
+            results.push_back(b.bitcast(vec, vec_ty(i32_ty, 2)));
+          if (kBase == 16)
+            results.push_back(b.bitcast(vec, vec_ty(i32_ty, 4)));
+        } else {
+          if (4 == kBase)
+            // This is for int8 on pre- CDNA3 GPUs
+            results.push_back(b.bitcast(vec, i32_ty));
+          if (8 == kBase)
+            results.push_back(b.bitcast(vec, i64_ty));
+          if (16 == kBase)
+            // This is only for the operands of scaled mfma on CDNA4
+            results.push_back(b.bitcast(vec, vec_ty(i32_ty, 4)));
+          if (32 == kBase)
+            results.push_back(b.bitcast(vec, vec_ty(i32_ty, 8)));
+        }
       } else {
         results.push_back(vec);
       }
@@ -478,24 +487,24 @@ struct DotOpMFMAConversionHelper {
             SmallVector<Value> vals;
             if (type.isF32() && allowXF32) {
               vals = extractOperands(rawElems, kWidth, kBase, f32_ty,
-                                     preserveBF16);
+                                     preserveBF16, isConstantScale, isSparseDot);
             } else if (type.getIntOrFloatBitWidth() == 8) {
               vals = extractOperands(rawElems, kWidth, kBase, i8_ty,
-                                     preserveBF16, isConstantScale);
+                                     preserveBF16, isConstantScale, isSparseDot);
             } else if (type.isBF16()) {
               vals = extractOperands(rawElems, kWidth, kBase, bf16_ty,
-                                     preserveBF16);
+                                     preserveBF16, isConstantScale, isSparseDot);
               // 2:4 Sparse aMeta is passed as I16
             } else if (type.isInteger(16)) {
               vals = extractOperands(rawElems, kWidth, kBase, i16_ty,
-                                     preserveBF16);
+                                     preserveBF16, isConstantScale, isSparseDot);
             } else if (type.isInteger(32)) {
               vals = extractOperands(rawElems, kWidth, kBase, i32_ty,
-                                     preserveBF16);
+                                     preserveBF16, isConstantScale, isSparseDot);
             } else {
               assert(type.isF16() && "Unsupported data type");
               vals = extractOperands(rawElems, kWidth, kBase, f16_ty,
-                                     preserveBF16);
+                                     preserveBF16, isConstantScale, isSparseDot);
             }
             for (int k = 0; k < kpack; ++k) {
               dotOpVals[k][{b, i, j}] = vals[k];
@@ -777,6 +786,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                                  AMDSparseMfmaEncodingAttr sparseAMfmaLayout,
                                  SparseDotOpAdaptor adaptor) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
+
     // Check if this dot has come with priority set by setprio.
     auto setPrioOp = dyn_cast_or_null<ROCDL::SetPrioOp>(op->getPrevNode());
 
@@ -814,7 +824,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     intrinsicName = maybeMfmaIntrinsic->name;
     unsigned kBase = maybeMfmaIntrinsic->kBase;
     unsigned mfmaMDim = maybeMfmaIntrinsic->mDim;
-    unsigned mfmaNDim = maybeMfmaIntrinsic->mDim;
+    unsigned mfmaNDim = maybeMfmaIntrinsic->nDim;
+    unsigned mfmaKDim = maybeMfmaIntrinsic->kDim;
     assert(mfmaMDim == mfmaNDim);
 
     auto aEncoding = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
@@ -827,7 +838,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     assert(kWidthSparse * 2 == kWidth);
 
     const auto kDimInstrSize = mfmaLayout.getInstrShapeForOperand(kWidth, 0)[1];
-    printf ("kDimInstrSize: %d\n", kDimInstrSize);
 
     auto repA = sparseAMfmaLayout.getRepForOperand(aTensorTy.getShape(),
                                                    kWidthSparse, 0);
@@ -861,25 +871,20 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
         bTensorTy.getElementType(), /*allowXF32=*/false,
         /*preserveBF16=*/false, /*isConstant=*/false, /*isSparseDot=*/true);
 
-    // There are 1/8 as many elements on the K-dim for the metadata layout.
-    // 3. kBase: the number of elements each thread holds for a single mfma
-    //    instruction.
-    // 1. kWidth: the number of elements each thread loads from shared memory in
-    //    preparation for mfma instructions.
-    printf("numRepBK: %d\n", numRepBK);
-    printf("kWidthSparse: %d\n", kWidthSparse);
-    printf("kBase: %d\n", kWidth);
-
     assert(aMetaTensorTy.getElementType() == i16_ty &&
            "aMeta elems must be i16");
 
     // Each 16b input smfmac (fp16/bf16) uses 8 bits per lane
     int kPack = kWidth / kBase;
+    /*
     bool checkType2Byte = (aTensorTy.getElementType() == bf16_ty) ||
+                          (aTensorTy.getElementType() == f16_ty);
+    bool checkType1Byte = (aTensorTy.getElementType() == bf16_ty) ||
                           (aTensorTy.getElementType() == f16_ty);
     assert(kPack == 2 && checkType2Byte &&
            "We should load 16 bits of metadata per lane for kPack == 2 for "
            "FP16/BF16 inputs");
+    */
 
     auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
     // SmallVector<Value> aMetaPacked(aMetaElems.size());
@@ -893,8 +898,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     if (kDimInstrSize == 32)
       elemStride = 1;
 
-    printf ("elemStride: %d\n", elemStride);
-
     assert(elemStride >= 1 && "Computed elemStride should be positive");
 
     for (auto elemIdx = 0; elemIdx < (numRepB * numRepM * numRepBK) * elemStride; elemIdx += elemStride) {
@@ -905,12 +908,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     auto aMetaShape = aMetaTensorTy.getShape();
     auto numMFMAs = numRepB * numRepM * numRepN * numRepBK * kPack;
-    printf("numMFMAs: %d\n", numMFMAs);
-    // TODO: fix this assert to account for numWarps
-    // TODO: num warps breaking this??
-    // assert(aMetaPacked.size() == aMetaShape[1] &&
-    //    "We should load 1 I16 input for every 2 SMFMA ops per-lane on the
-    //    K-Dim");
 
     auto ty = LLVM::LLVMStructType::getLiteral(
         rewriter.getContext(), SmallVector<Type>(aMetaPacked.size(), i32_ty));
@@ -919,10 +916,11 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     unsigned long adjustKPack = kWidth / kBase;
 
-    // The math for kWidth and kBase are wrong, since we are loading 1 value for
-    // every 2 smfmac ops.
+    // The math for kWidth and kBase is "wrong", since we are loading 1 value for
+    // every 2 smfmac ops. It's actually fine to do this here, since
+    // we've already ensured these values are correct.
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
-        packedAMeta, numRepB, numRepM, std::max((unsigned long)(numRepBK), 1ul),
+        packedAMeta, numRepB, numRepM, numRepBK,
         /*kWidth=*/1u, /*kBase=*/1ul, i32_ty,
         /*allowXF32=*/false,
         /*preserveBF16=*/false);
@@ -931,12 +929,14 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto fc = unpackLLElements(loc, loadedC, rewriter);
 
     unsigned warpSize = triton::gpu::lookupThreadsPerWarp(rewriter);
+
     // compute number of output elements that each thread holds for one MFMA
     // instruction.
     const int subBlocks =
         getNumSubmatrices(aTensorTy.getElementType(), mDim, nDim);
-    auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
 
+
+    auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
     Value firstMfma;
 
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
@@ -955,13 +955,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           acc = zeroAuxiliarBlocks(subBlocks, acc);
 
           for (int k = 0; k < numRepBK; k++) {
-            printf("k value encountered: %d\n", k);
             for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
-              printf("kPack encountered: %d\n", kPack);
-              // TODO: transposed mfma layouts don't work with sparse_dot
-              // This is because the A-input is always the sparse one, so
-              // you cannot just swap A, B.
-
               // "For every smfmac instruction if CBSZ[1:0]=0,
               // ABID[1:0] selects one of four 8-bit sets of sparse
               // indices from reg_idx." --CK

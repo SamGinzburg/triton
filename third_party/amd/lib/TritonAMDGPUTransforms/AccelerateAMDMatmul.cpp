@@ -969,6 +969,15 @@ public:
         warpsPerTileMFMA(dotOp, retShape, numWarps, {mDim, nDim});
 
     auto aElemTy = mfmaInstr->aElementType;
+    auto bElemTy = mfmaInstr->bElementType;
+
+    // Adjust kPack based on the datatype
+    // fp16/bf16 --> kPack needs to be 2
+    // fp8/bf8 --> kPack needs to be 1
+    assert (aElemTy == bElemTy && "For now, we only support sparse dot with the same A and B element type inputs");
+    int localKPack = 2;
+    if (aElemTy.getIntOrFloatBitWidth() == 16)
+      localKPack = 1;
 
     // We cannot support transposed MFMA layouts for 2:4 sparsity on AMD
     // This is because we cannot swap the A, B inputs, as only the A input can
@@ -1010,7 +1019,7 @@ public:
     // However, in FA, the second dot can only use kWidth = kBase since it's
     // limited by the result of the first dot, which is of mfmaLayout.
     if (!isChainDotTail(dotOp))
-      kWidth *= kPack;
+      kWidth *= localKPack;
 
     // The A input has half the K-dim of the B-input for 2:4 smfmac instructions
     // So we want to load half as many elements
@@ -1389,7 +1398,7 @@ public:
       // So kPack must be 2, since the metadata (compression) matrix is of type
       // i16. It has to be be i16 to be compatible with the NVIDIA backend.
       patterns.add<::SparseBlockedToMFMA>(context, getMfmaVersion(isaFamily),
-                                          matrixInstructionSize, /*kPack=*/2,
+                                          matrixInstructionSize, /*kPack=*/1,
                                           /*benefit=*/2);
 
       break;
