@@ -306,14 +306,14 @@ MfmaDatabase::MfmaDatabase(MLIRContext *context) {
       TRITON_MFMA_SPARSE_v(3, 16, 16, bf16T, bf16T, smfmac_f32_16x16x32_bf16,
                            32, 8),
       // MI300 / CDNA3 does not support ocpFp8T (Float8E4M3FNType)
-      TRITON_MFMA_SPARSE_v(3, 16, 16, amdFp8T, amdFp8T, smfmac_f32_16x16x64_fp8_fp8, 64,
-                           16),
-      TRITON_MFMA_SPARSE_v(3, 32, 32, amdFp8T, amdFp8T, smfmac_f32_32x32x32_fp8_fp8, 32,
-                           16),
-      TRITON_MFMA_SPARSE_v(3, 16, 16, amdBf8T, amdBf8T, smfmac_f32_16x16x64_bf8_bf8, 64,
-                           16),
-      TRITON_MFMA_SPARSE_v(3, 32, 32, amdBf8T, amdBf8T, smfmac_f32_32x32x32_bf8_bf8, 32,
-                           16),
+      TRITON_MFMA_SPARSE_v(3, 16, 16, amdFp8T, amdFp8T,
+                           smfmac_f32_16x16x64_fp8_fp8, 64, 16),
+      TRITON_MFMA_SPARSE_v(3, 32, 32, amdFp8T, amdFp8T,
+                           smfmac_f32_32x32x32_fp8_fp8, 32, 16),
+      TRITON_MFMA_SPARSE_v(3, 16, 16, amdBf8T, amdBf8T,
+                           smfmac_f32_16x16x64_bf8_bf8, 64, 16),
+      TRITON_MFMA_SPARSE_v(3, 32, 32, amdBf8T, amdBf8T,
+                           smfmac_f32_32x32x32_bf8_bf8, 32, 16),
   };
 }
 

@@ -381,7 +381,8 @@ struct DotOpMFMAConversionHelper {
   /// kBase elements for each mfma instruction
   SmallVector<Value> extractOperands(Value rawElems, int kWidth, int kBase,
                                      Type type, bool preserveBF16,
-                                     bool isConstantScale = false, bool isSparseDot = false) const {
+                                     bool isConstantScale = false,
+                                     bool isSparseDot = false) const {
     auto b = TritonLLVMOpBuilder(loc, rewriter);
     int kpack = kWidth / kBase;
     SmallVector<Value> results;
@@ -419,7 +420,8 @@ struct DotOpMFMAConversionHelper {
           }
         }
         if (isSparseDot) {
-          assert (kBase == 8 || kBase == 16 && "kBase can only be 8 or 16 for the FP8 / BF8 sparse dot case");
+          assert(kBase == 8 || kBase == 16 && "kBase can only be 8 or 16 for "
+                                              "the FP8 / BF8 sparse dot case");
           if (kBase == 8)
             results.push_back(b.bitcast(vec, vec_ty(i32_ty, 2)));
           if (kBase == 16)
@@ -473,25 +475,31 @@ struct DotOpMFMAConversionHelper {
           } else {
             SmallVector<Value> vals;
             if (type.isF32() && allowXF32) {
-              vals = extractOperands(rawElems, kWidth, kBase, f32_ty,
-                                     preserveBF16, isConstantScale, isSparseDot);
+              vals =
+                  extractOperands(rawElems, kWidth, kBase, f32_ty, preserveBF16,
+                                  isConstantScale, isSparseDot);
             } else if (type.getIntOrFloatBitWidth() == 8) {
-              vals = extractOperands(rawElems, kWidth, kBase, i8_ty,
-                                     preserveBF16, isConstantScale, isSparseDot);
+              vals =
+                  extractOperands(rawElems, kWidth, kBase, i8_ty, preserveBF16,
+                                  isConstantScale, isSparseDot);
             } else if (type.isBF16()) {
-              vals = extractOperands(rawElems, kWidth, kBase, bf16_ty,
-                                     preserveBF16, isConstantScale, isSparseDot);
+              vals =
+                  extractOperands(rawElems, kWidth, kBase, bf16_ty,
+                                  preserveBF16, isConstantScale, isSparseDot);
               // 2:4 Sparse aMeta is passed as I16
             } else if (type.isInteger(16)) {
-              vals = extractOperands(rawElems, kWidth, kBase, i16_ty,
-                                     preserveBF16, isConstantScale, isSparseDot);
+              vals =
+                  extractOperands(rawElems, kWidth, kBase, i16_ty, preserveBF16,
+                                  isConstantScale, isSparseDot);
             } else if (type.isInteger(32)) {
-              vals = extractOperands(rawElems, kWidth, kBase, i32_ty,
-                                     preserveBF16, isConstantScale, isSparseDot);
+              vals =
+                  extractOperands(rawElems, kWidth, kBase, i32_ty, preserveBF16,
+                                  isConstantScale, isSparseDot);
             } else {
               assert(type.isF16() && "Unsupported data type");
-              vals = extractOperands(rawElems, kWidth, kBase, f16_ty,
-                                     preserveBF16, isConstantScale, isSparseDot);
+              vals =
+                  extractOperands(rawElems, kWidth, kBase, f16_ty, preserveBF16,
+                                  isConstantScale, isSparseDot);
             }
             for (int k = 0; k < kpack; ++k) {
               dotOpVals[k][{b, i, j}] = vals[k];
@@ -875,7 +883,9 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     assert(elemStride >= 1 && "Computed elemStride should be positive");
 
-    for (auto elemIdx = 0; elemIdx < (numRepB * numRepM * numRepBK) * elemStride; elemIdx += elemStride) {
+    for (auto elemIdx = 0;
+         elemIdx < (numRepB * numRepM * numRepBK) * elemStride;
+         elemIdx += elemStride) {
       auto elem = tb.bitcast(aMetaElems[elemIdx % aMetaElems.size()], i16_ty);
       aMetaPacked.push_back(tb.zext(i32_ty, elem));
     }
@@ -888,9 +898,9 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
 
     unsigned long adjustKPack = kWidth / kBase;
 
-    // The math for kWidth and kBase is "wrong", since we are loading 1 value for
-    // every 2 smfmac ops. It's actually fine to do this here, since
-    // we've already ensured these values are correct.
+    // The math for kWidth and kBase is "wrong", since we are loading 1 value
+    // for every 2 smfmac ops. It's actually fine to do this here, since we've
+    // already ensured these values are correct.
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
         packedAMeta, numRepB, numRepM, numRepBK,
         /*kWidth=*/1u, /*kBase=*/1ul, i32_ty,
@@ -906,7 +916,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     // instruction.
     const int subBlocks =
         getNumSubmatrices(aTensorTy.getElementType(), mDim, nDim);
-
 
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
     Value firstMfma;
@@ -945,7 +954,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // We fix kPack==2 for bf16/fp16 inputs, in reality we only load 1
               // element per thread that is shared between two sparse mfma
               // operations.
-              // TODO: We can reduce register pressure by packing I16s into I32 values
+              // TODO: We can reduce register pressure by packing I16s into I32
+              // values
               auto values = operandAMeta[0][{b, m, k}];
               auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
 

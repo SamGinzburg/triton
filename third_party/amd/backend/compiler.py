@@ -17,6 +17,7 @@ def get_min_dot_size(target: GPUTarget):
     # not supported natively by matrix core units.
     return lambda lhs_type, rhs_type: (1, 1, 1)
 
+
 def get_supported_sparse_dot_dtypes(target: GPUTarget):
     # TODO: for now, only support MI300/CDNA3; enable MI350 when ready
     if target.arch == "gfx942":
@@ -24,10 +25,12 @@ def get_supported_sparse_dot_dtypes(target: GPUTarget):
     else:
         return None
 
+
 # This is always False on AMD targets
 # This is because on AMD, sparse dot ops cannot pass the accumulator as an argument to the sparse MFMA instruction
 def sparse_dot_acc(target: GPUTarget):
     return False
+
 
 def is_pingpong_schedule_enabled(arch):
     default = "1" if arch == "gfx942" else "0"
@@ -153,7 +156,10 @@ class HIPBackend(BaseBackend):
         )
 
     def get_codegen_implementation(self, options):
-        return {"min_dot_size": get_min_dot_size(self.target), "supported_sparse_dot_dtypes": get_supported_sparse_dot_dtypes(self.target)}
+        return {
+            "min_dot_size": get_min_dot_size(self.target), "supported_sparse_dot_dtypes":
+            get_supported_sparse_dot_dtypes(self.target)
+        }
 
     def get_module_map(self) -> Dict[str, ModuleType]:
         from triton.language.extra.hip import libdevice

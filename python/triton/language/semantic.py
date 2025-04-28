@@ -1603,7 +1603,7 @@ def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
     assert lhs.type.is_block() and rhs.type.is_block()
 
     supported_sparse_dot_dtypes = builder.codegen_fns.get("supported_sparse_dot_dtypes")
-    assert supported_sparse_dot_dtypes is not None, f"Sparse dot is unsupported on this platform"
+    assert supported_sparse_dot_dtypes is not None, "Sparse dot is unsupported on this platform"
     assert supported_sparse_dot_dtypes(lhs.dtype), f"Unsupported lhs dtype {lhs.dtype}"
     assert supported_sparse_dot_dtypes(rhs.dtype), f"Unsupported rhs dtype {rhs.dtype}"
     assert lhs.dtype == rhs.dtype, f"Both operands must be same dtype. Got {lhs.dtype} and {rhs.dtype}"

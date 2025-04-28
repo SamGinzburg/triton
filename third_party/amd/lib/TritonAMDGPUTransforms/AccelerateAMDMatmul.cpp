@@ -974,7 +974,8 @@ public:
     // Adjust kPack based on the datatype
     // fp16/bf16 --> kPack needs to be 2
     // fp8/bf8 --> kPack needs to be 1
-    assert (aElemTy == bElemTy && "For now, we only support sparse dot with the same A and B element type inputs");
+    assert(aElemTy == bElemTy && "For now, we only support sparse dot with the "
+                                 "same A and B element type inputs");
     int localKPack = 1;
     if (aElemTy.getIntOrFloatBitWidth() == 16)
       localKPack = 2;
@@ -997,7 +998,8 @@ public:
 
     // The layout for aMeta
     // TODO: can this be improved? Changing this seems to break things atm
-    // SmallVector<unsigned, 2> warpsPerTileCompression = {1, static_cast<unsigned>(numWarps)};
+    // SmallVector<unsigned, 2> warpsPerTileCompression = {1,
+    // static_cast<unsigned>(numWarps)};
     compressionMfmaEnc = ttg::AMDCompressionMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
