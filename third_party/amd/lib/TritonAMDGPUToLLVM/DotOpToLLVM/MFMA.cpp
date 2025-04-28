@@ -386,8 +386,9 @@ struct DotOpMFMAConversionHelper {
     int kpack = kWidth / kBase;
     SmallVector<Value> results;
     auto vecTy = vec_ty(type, kBase);
-    if (type.isBF16() && !preserveBF16)
+    if (type.isBF16() && !preserveBF16) {
       vecTy = vec_ty(i16_ty, kBase);
+    }
     for (int k = 0; k < kpack; ++k) {
       Value vec = b.undef(vecTy);
       for (int elemId = 0; elemId < kBase; ++elemId) {
@@ -457,25 +458,11 @@ struct DotOpMFMAConversionHelper {
         for (int j = 0; j < n1; j++) {
           Type elemTy = typeConverter->convertType(type);
           Type ty = vec_ty(elemTy, kWidth);
-          // We only need this for sparse dot
-          if (type.isBF16() && !preserveBF16 && isSparseDot) {
-            ty = vec_ty(i16_ty, kBase);
-          }
           Value rawElems = tb.undef(ty);
           for (int k = 0; k < kWidth; ++k) {
-            printf("elems len: %d\n", elems.size());
-            printf("idx into elems: %d\n",
-                   kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k);
-
             auto val =
                 elems[kWidth * n1 * n0 * b + kWidth * n1 * i + kWidth * j + k];
-            // Same case as earlier, we only need this for sparse dot
-            if (type.isBF16() && !preserveBF16 && isSparseDot) {
-              auto cast = tb.bitcast(val, i16_ty);
-              rawElems = tb.insert_element(ty, rawElems, cast, tb.i32_val(k));
-            } else {
-              rawElems = tb.insert_element(ty, rawElems, val, tb.i32_val(k));
-            }
+            rawElems = tb.insert_element(ty, rawElems, val, tb.i32_val(k));
           }
 
           Value convertedElems;
@@ -874,18 +861,6 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     assert(aMetaTensorTy.getElementType() == i16_ty &&
            "aMeta elems must be i16");
 
-    // Each 16b input smfmac (fp16/bf16) uses 8 bits per lane
-    int kPack = kWidth / kBase;
-    /*
-    bool checkType2Byte = (aTensorTy.getElementType() == bf16_ty) ||
-                          (aTensorTy.getElementType() == f16_ty);
-    bool checkType1Byte = (aTensorTy.getElementType() == bf16_ty) ||
-                          (aTensorTy.getElementType() == f16_ty);
-    assert(kPack == 2 && checkType2Byte &&
-           "We should load 16 bits of metadata per lane for kPack == 2 for "
-           "FP16/BF16 inputs");
-    */
-
     auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
     // SmallVector<Value> aMetaPacked(aMetaElems.size());
     SmallVector<Value> aMetaPacked;
@@ -901,14 +876,11 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     assert(elemStride >= 1 && "Computed elemStride should be positive");
 
     for (auto elemIdx = 0; elemIdx < (numRepB * numRepM * numRepBK) * elemStride; elemIdx += elemStride) {
-      printf("elemIdx in loop: %d\n", elemIdx);
       auto elem = tb.bitcast(aMetaElems[elemIdx % aMetaElems.size()], i16_ty);
       aMetaPacked.push_back(tb.zext(i32_ty, elem));
     }
 
     auto aMetaShape = aMetaTensorTy.getShape();
-    auto numMFMAs = numRepB * numRepM * numRepN * numRepBK * kPack;
-
     auto ty = LLVM::LLVMStructType::getLiteral(
         rewriter.getContext(), SmallVector<Type>(aMetaPacked.size(), i32_ty));
     Value packedAMeta =
@@ -973,6 +945,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // We fix kPack==2 for bf16/fp16 inputs, in reality we only load 1
               // element per thread that is shared between two sparse mfma
               // operations.
+              // TODO: We can reduce register pressure by packing I16s into I32 values
               auto values = operandAMeta[0][{b, m, k}];
               auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
 
