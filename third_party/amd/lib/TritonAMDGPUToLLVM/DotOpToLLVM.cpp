@@ -20,8 +20,8 @@ LogicalResult convertScaledMFMA(triton::DotScaledOp op,
                                 const LLVMTypeConverter *typeConverter,
                                 ConversionPatternRewriter &rewriter);
 
-LogicalResult convertSparseMFMA(triton::SparseDotOp op,
-                                triton::SparseDotOp::Adaptor adaptor,
+LogicalResult convertSparseMFMA(triton::DotSparseOp op,
+                                triton::DotSparseOp::Adaptor adaptor,
                                 const LLVMTypeConverter *typeConverter,
                                 ConversionPatternRewriter &rewriter);
 
@@ -78,7 +78,7 @@ struct ScaledDotOpConversion
 };
 
 struct SparseDotOpConversion
-    : public ConvertOpToLLVMPattern<triton::SparseDotOp> {
+    : public ConvertOpToLLVMPattern<triton::DotSparseOp> {
   using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
   int mfmaVersion;
   int nonKDim;
@@ -90,7 +90,7 @@ struct SparseDotOpConversion
         mfmaVersion(mfmaVersion), nonKDim(nonKDim), kPack(kPack) {}
 
   LogicalResult
-  matchAndRewrite(triton::SparseDotOp op, OpAdaptor adaptor,
+  matchAndRewrite(triton::DotSparseOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     return AMD::convertSparseMFMA(op, adaptor, getTypeConverter(), rewriter);
   }

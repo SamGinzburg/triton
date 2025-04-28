@@ -1599,7 +1599,7 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, input_precision: Optiona
                      ret_ty)
 
 
-def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tensor, builder: ir.builder) -> tl.tensor:
+def dot_sparse(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tensor, builder: ir.builder) -> tl.tensor:
     assert lhs.type.is_block() and rhs.type.is_block()
 
     supported_sparse_dot_dtypes = builder.codegen_fns.get("supported_sparse_dot_dtypes")
@@ -1637,7 +1637,7 @@ def sparse_dot(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
         acc_handle = acc.handle
         assert acc.type == ret_ty
 
-    return tl.tensor(builder.create_sparse_dot(lhs.handle, rhs.handle, acc_handle, lhs_meta.handle), ret_ty)
+    return tl.tensor(builder.create_dot_sparse(lhs.handle, rhs.handle, acc_handle, lhs_meta.handle), ret_ty)
 
 
 def _str_to_fp_type(float_format: str):

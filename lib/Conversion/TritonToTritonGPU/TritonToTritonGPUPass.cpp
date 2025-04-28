@@ -625,7 +625,7 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       // this assumes the right layout will be set later for dot scaled and
       // sparse dot.
       GenericOpPattern<triton::DotScaledOp>,
-      GenericOpPattern<triton::SparseDotOp>, GenericOpPattern<triton::CallOp>,
+      GenericOpPattern<triton::DotSparseOp>, GenericOpPattern<triton::CallOp>,
       TritonFuncOpPattern>(typeConverter, context);
 }
 // Proton patterns

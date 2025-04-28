@@ -356,8 +356,8 @@ bool DotScaledOp::verifyOutputDims() {
   return true;
 }
 
-//-- SparseDotOp --
-bool SparseDotOp::verifyDims() {
+//-- DotSparseOp --
+bool DotSparseOp::verifyDims() {
   auto aShape = this->getA().getType().getShape();
   auto bShape = this->getB().getType().getShape();
   return aShape[aShape.size() - 1] * 2 == bShape[aShape.size() - 2];

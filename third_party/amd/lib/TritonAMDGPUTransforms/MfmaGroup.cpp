@@ -47,11 +47,14 @@ MfmaKey composeMfmaKeyFor(unsigned version, unsigned mDim, unsigned nDim,
     aElemType = bElemType = aET = bET = b.getF16Type();
   }
 
-  // TODO: refactor this nicely once things work
+  assert(((withScale && !isSparse) || (!withScale && isSparse) ||
+          (!withScale && !isSparse)) &&
+         "Invalid argument, type of selected dot must be either normal, "
+         "scaled, or sparse.");
   auto dotType = MfmaKeyDotType::STANDARD;
   if (isSparse)
     dotType = MfmaKeyDotType::SPARSE;
-  if (withScale)
+  else if (withScale)
     dotType = MfmaKeyDotType::SCALED;
 
   return {version, mDim, nDim, aET.getTypeID(), bET.getTypeID(), dotType};

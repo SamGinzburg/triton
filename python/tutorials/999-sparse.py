@@ -152,23 +152,16 @@ def matmul_kernel_sparse(
         else:
             # Load the next block of A and B, generate a mask by checking the K dimension.
             # If it is out of bounds, set it to 0.
-            a = tl.load(a_ptrs, mask=offs_k_a[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-
-            # Note: the masks below are not correct. It's fine for M=N=K=8192 because 8192 is a power of 2. But this kernel is not correct for other shapes.
-            # For some reason, things don't work if I fix the masks. Did not have time to figure out why. Do not use in production.
-            # @nocommit.
-            b = tl.load(b_ptrs, mask=offs_k_b[:, None] < K - k * BLOCK_SIZE_K_A, other=0.0)
+            a = tl.load(a_ptrs, mask=offs_k_a[None, :] < K - k * BLOCK_SIZE_K_A, other=0.0)
+            b = tl.load(b_ptrs, mask=offs_k_b[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
             aMeta = tl.load(
                 aMeta_ptrs,
                 mask=offs_k_aMeta[None, :] < K - k * BLOCK_SIZE_K_A_META,
-                other=0,
+                other=0.0,
             )
 
         # We accumulate along the K dimension.
-        accumulator += tl.sparse_dot(a, b, aMeta)
-
-        #if pid == 0:
-        #  tl.device_print("bccumulator", accumulator, hex=False)
+        accumulator += tl.dot_sparse(a, b, aMeta)
 
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K_A * stride_ak
@@ -180,8 +173,6 @@ def matmul_kernel_sparse(
         c = accumulator.to(tl.bfloat16)
     else:
         c = accumulator.to(tl.float16)
-    # if pid == 0:
-    #  tl.device_print("c", c, hex=False)
 
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
@@ -200,20 +191,8 @@ def make_sparse(A):
     for i in range(A.shape[0]):
         indices_to_zero = []
         for j in range(0, A.shape[1], 4):
-            # This is what we want to work
+            # Randomly zero 2 out of 4 consecutive elements
             indices_to_zero.extend(random.sample([j, j + 1, j + 2, j + 3], 2))
-
-            # Using just this works
-            # indices_to_zero.extend(random.sample([j, j + 1], 2))
-
-
-            # Create a fixed pattern
-            """
-            if constant % 2 == 0:
-                indices_to_zero.extend([j, j + 1])
-            elif constant % 2 == 1:
-                indices_to_zero.extend([j + 1, j + 2])
-            """
         constant += 1
         A[i, indices_to_zero] = 0
     return A
@@ -243,7 +222,6 @@ def compress(A):
             nibble |= 0b0100
             nonzero_indices.extend([outerIdx + 0, outerIdx + 1])
 
-        # there is definitely a cleaner way to do this... don't judge me
         if nonzeroCount == 1:
             last_nonzero = nonzero_indices[-1]
             if last_nonzero == outerIdx + 3:
@@ -261,8 +239,6 @@ def compress(A):
     assert len(nonzero_indices) == len(flat) // 2
 
     metas = []
-    #[Shucai:] The 4 here should be 2 and there are only 8 bits can be
-    # used in each meta element
     for outerIdx in range(0, len(meta_nibbles), 4):
         meta = 0
         meta |= meta_nibbles[outerIdx + 0] << 0
@@ -272,7 +248,6 @@ def compress(A):
         metas.append(meta)
 
     aSparse = (A.flatten()[nonzero_indices]).reshape(A.shape[0], A.shape[1] // 2)
-    # [Shucai:] I thik the aMeta shape should be (A.shape[0], A.shape[1] // 8)
     aMeta = torch.tensor(np.array(metas, dtype=np.uint16).astype(np.int16)).reshape(
         A.shape[0], A.shape[1] // 16
     )
@@ -328,38 +303,23 @@ def matmul(aSparse, aMeta, b, config):
 
     return c
 
-def test_sparse_matrix():
+def test_sparse_matrix(dtype):
+    print ("Testing dtype: ", str(dtype))
     torch.manual_seed(42)
-    test_dim = 512
-    # dtype = torch.float16
-    # dtype = torch.bfloat16
-    dtype = torch.float8_e4m3fnuz
+    test_dim = 512 + 16
 
     a = make_sparse(torch.randn((test_dim, test_dim), device="cuda", dtype=torch.float16))
-    # a = make_sparse(torch.ones((test_dim, test_dim), device="cuda", dtype=torch.float16))
     print("Running sparse compression in Python... this can be quite slow, be patient!")
     aSparse, aMeta = compress(a)
     b = torch.randn((test_dim, test_dim), device="cuda", dtype=torch.float16)
-    # b = torch.ones((test_dim, test_dim), device="cuda", dtype=torch.float16)
-
-    """
-    for row in range((test_dim)):
-        for col in range((test_dim)):
-            b[row][col] = (row * col) / 1024
-    """
-    #b = torch.ones((test_dim, test_dim), device="cuda", dtype=dtype)
 
     a = a.to(dtype)
     aSparse = aSparse.to(dtype)
     b = b.to(dtype)
     b = b.T.contiguous().T
 
-    # print (a, b)
     print("Autotuning... set TRITON_PRINT_AUTOTUNING=1 to see logs here...")
     print ("aMeta: ", aMeta)
-
-
-    print (torch.__version__)
 
     if dtype == torch.float8_e4m3fnuz:
         one_device = torch.tensor(1.0, device=a.device)
@@ -371,8 +331,6 @@ def test_sparse_matrix():
         print ("Config: ", config)
         triton_output = matmul(aSparse, aMeta, b, config)
         print(f"config = {config}")
-        print ("triton: ", triton_output)
-        print ("torch: ", torch_output)
 
         #triton_output = triton_output.to(torch.float32)
         #torch_output = torch_output.to(torch.float32)
@@ -385,9 +343,6 @@ def test_sparse_matrix():
             print("FAILED: Triton and Torch differ! ❌")
             print ("Triton output: ", triton_output)
             print ("torch output: ", torch_output)
-            for row in (triton_output - torch_output):
-                print (row)
-            # print (triton_output - torch_output)
 
     print(f"report best performance")
     best_triton_flops = 0.0
@@ -404,4 +359,9 @@ def test_sparse_matrix():
     flops = 2 * test_dim * test_dim * test_dim * 1e-12 / (ms_torch * 1e-3)
     print(f"Perf (torch): {flops} TFLOPS")
 
-test_sparse_matrix()
+
+# On MI300x, torch.float8_e4m3fnuz is used instead of torch.float8_e4m3fn
+dtypes = [torch.float16, torch.bfloat16, torch.float8_e4m3fnuz]
+
+for dtype in dtypes:
+    test_sparse_matrix(dtype)

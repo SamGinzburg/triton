@@ -714,14 +714,16 @@ def TT_DotScaledOp : TT_Op<"dot_scaled", [Pure,
 //
 // Dot Op
 //
-def TT_SparseDotOp : TT_Op<"sparse_dot", [Pure,
+def TT_DotSparseOp : TT_Op<"dot_sparse", [Pure,
                              DeclareOpInterfaceMethods<DotOpInterface>,
                              TypesMatchWith<"result's type matches accumulator's type",
                                             "d", "c", "$_self">]> {
-    let summary = "sparse_dot";
+    let summary = "dot_sparse";
 
     let description = [{
-        TODO
+        $d = sparse_matrix_multiply($a, $b, $aMeta) + $c. The $a input is 2:4 sparse, such that two out of four
+        consecutive elements are zero. The $aMeta input is a metadata matrix that describes which two out of four
+        elements are sparse (i.e., zero) in the $a input. The $b input is dense, as in a normal `tl.dot` operation.
     }];
 
     let arguments = (

@@ -210,7 +210,7 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
                                /*allowXF32=*/false);
 }
 
-FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::SparseDotOp dot,
+FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotSparseOp dot,
                                                int mfmaVersion, int nonKDim) {
   RankedTensorType aType = dot.getA().getType();
   return chooseMfmaInstruction(
@@ -916,7 +916,7 @@ public:
   }
 };
 
-class SparseBlockedToMFMA : public OpRewritePattern<tt::SparseDotOp> {
+class SparseBlockedToMFMA : public OpRewritePattern<tt::DotSparseOp> {
   int mfmaVersion;
   int nonKDim;
   int kPack;
@@ -927,7 +927,7 @@ public:
       : OpRewritePattern(context, benefit), mfmaVersion(mfmaVersion),
         nonKDim(nonKDim), kPack(kPack) {}
 
-  LogicalResult matchAndRewrite(tt::SparseDotOp dotOp,
+  LogicalResult matchAndRewrite(tt::DotSparseOp dotOp,
                                 PatternRewriter &rewriter) const override {
     RankedTensorType oldRetType = dotOp.getType();
     if (!oldRetType.getEncoding() ||
@@ -997,9 +997,6 @@ public:
         /*instrShape*/ mDim, nDim, isTransposed, CTALayout);
 
     // The layout for aMeta
-    // TODO: can this be improved? Changing this seems to break things atm
-    // SmallVector<unsigned, 2> warpsPerTileCompression = {1,
-    // static_cast<unsigned>(numWarps)};
     compressionMfmaEnc = ttg::AMDCompressionMfmaEncodingAttr::get(
         oldRetType.getContext(),
         /*versionMajor*/ mfmaVersion, /*versionMinor*/ 0, warpsPerTile,
@@ -1036,7 +1033,7 @@ public:
     aMeta = convertAndCastTensor(rewriter, aMeta, compressionMfmaEnc,
                                  aMetaType.getElementType());
 
-    auto newDot = rewriter.create<tt::SparseDotOp>(
+    auto newDot = rewriter.create<tt::DotSparseOp>(
         dotOp.getLoc(), newAcc.getType(), a, b, newAcc, aMeta);
     Value dotOutput =
         convertAndCastTensor(rewriter, newDot, oldRetType.getEncoding(),

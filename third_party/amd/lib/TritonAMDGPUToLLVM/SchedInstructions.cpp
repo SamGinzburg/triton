@@ -46,7 +46,7 @@ template void setNumGeneratedMMAs(triton::DotOp op, size_t mmaCount, unsigned m,
 template void setNumGeneratedMMAs(triton::DotScaledOp op, size_t mmaCount,
                                   unsigned m, unsigned n, unsigned k,
                                   Type elementType);
-template void setNumGeneratedMMAs(triton::SparseDotOp op, size_t mmaCount,
+template void setNumGeneratedMMAs(triton::DotSparseOp op, size_t mmaCount,
                                   unsigned m, unsigned n, unsigned k,
                                   Type elementType);
 

@@ -777,9 +777,9 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     return rewriter.create(loweredOp)->getResult(0);
   }
 
-  LogicalResult convertSparseDot(SparseDotOp op,
+  LogicalResult convertSparseDot(DotSparseOp op,
                                  AMDSparseMfmaEncodingAttr sparseAMfmaLayout,
-                                 SparseDotOpAdaptor adaptor) const {
+                                 DotSparseOpAdaptor adaptor) const {
     auto tb = TritonLLVMOpBuilder(loc, rewriter);
 
     // Check if this dot has come with priority set by setprio.
@@ -1083,8 +1083,8 @@ LogicalResult convertScaledMFMA(triton::DotScaledOp op,
   return helper.convertScaledDot(op, adaptor);
 }
 
-LogicalResult convertSparseMFMA(triton::SparseDotOp op,
-                                triton::SparseDotOp::Adaptor adaptor,
+LogicalResult convertSparseMFMA(triton::DotSparseOp op,
+                                triton::DotSparseOp::Adaptor adaptor,
                                 const LLVMTypeConverter *typeConverter,
                                 ConversionPatternRewriter &rewriter) {
   auto rankedTType = [](Value tensor) {

@@ -60,7 +60,7 @@ from .core import (
     device_print,
     dot,
     dot_scaled,
-    sparse_dot,
+    dot_sparse,
     dtype,
     expand_dims,
     float16,
