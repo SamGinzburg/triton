@@ -17,6 +17,18 @@ def get_min_dot_size(target: GPUTarget):
     # not supported natively by matrix core units.
     return lambda lhs_type, rhs_type: (1, 1, 1)
 
+def get_min_sparse_dot_size(target: GPUTarget):
+    # sparse dot does not have FMA fallback enabled
+    def check_dot_compatibility(lhs_type, rhs_type) -> Tuple[int, int, int]:  # [m, n, k]
+        lhs_bitwidth = lhs_type.scalar.primitive_bitwidth
+        rhs_bitwidth = rhs_type.scalar.primitive_bitwidth
+        assert lhs_bitwidth == rhs_bitwidth, "lhs and rhs bitwidth must be the same"
+        if lhs_bitwidth == 8:
+            return (16, 16, 64)
+        else:
+            return (16, 16, 32)
+
+    return check_dot_compatibility
 
 def get_supported_sparse_dot_dtypes(target: GPUTarget):
     # TODO: for now, only support MI300/CDNA3; enable MI350 when ready
@@ -157,7 +169,7 @@ class HIPBackend(BaseBackend):
 
     def get_codegen_implementation(self, options):
         return {
-            "min_dot_size": get_min_dot_size(self.target), "supported_sparse_dot_dtypes":
+            "min_dot_size": get_min_dot_size(self.target), "min_sparse_dot_size": get_min_dot_size(self.target), "supported_sparse_dot_dtypes":
             get_supported_sparse_dot_dtypes(self.target)
         }
 

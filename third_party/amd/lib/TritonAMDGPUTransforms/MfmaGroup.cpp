@@ -49,7 +49,7 @@ MfmaKey composeMfmaKeyFor(unsigned version, unsigned mDim, unsigned nDim,
 
   assert(((withScale && !isSparse) || (!withScale && isSparse) ||
           (!withScale && !isSparse)) &&
-         "Invalid argument, type of selected dot must be either normal, "
+         "Invalid argument, type of selected dot must be either standard, "
          "scaled, or sparse.");
   auto dotType = MfmaKeyDotType::STANDARD;
   if (isSparse)

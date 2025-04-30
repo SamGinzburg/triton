@@ -213,9 +213,10 @@ FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotScaledOp dot,
 FailureOr<MfmaIntrinsic> chooseMfmaInstruction(tt::DotSparseOp dot,
                                                int mfmaVersion, int nonKDim) {
   RankedTensorType aType = dot.getA().getType();
+  // A is 2:4 sparse, so we multiply the kDim by 2 for MFMA instruction selection
   return chooseMfmaInstruction(
       mfmaVersion, dot.getC().getType(), aType.getElementType(),
-      dot.getB().getType().getElementType(), aType.getShape().back(), nonKDim,
+      dot.getB().getType().getElementType(), aType.getShape().back() * 2, nonKDim,
       /*withScale=*/false, /*isSparse=*/true, /*allowXF32=*/false);
 }
 

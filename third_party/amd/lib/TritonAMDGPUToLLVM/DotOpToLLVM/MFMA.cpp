@@ -323,7 +323,6 @@ struct DotOpMFMAConversionHelper {
     const int subBlocks =
         getNumSubmatrices(aTensorTy.getElementType(), mDim, nDim);
     auto elemsPerVec = mDim * nDim * subBlocks / warpSize;
-    printf("elemsPerVec: %d\n", elemsPerVec);
 
     Value firstMfma;
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);

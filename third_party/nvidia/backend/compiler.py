@@ -28,10 +28,22 @@ def min_dot_size(target: GPUTarget):
 
     return check_dot_compatibility
 
+def min_sparse_dot_size(target: GPUTarget):
+    # TODO: check sparse dot compatibility when we enable sparse dot on NVIDIA
+    def check_dot_compatibility(lhs_type, rhs_type) -> Tuple[int, int, int]:  # [m, n, k]
+        lhs_bitwidth = lhs_type.scalar.primitive_bitwidth
+        rhs_bitwidth = rhs_type.scalar.primitive_bitwidth
+        assert lhs_bitwidth == rhs_bitwidth, "lhs and rhs bitwidth must be the same"
+        if lhs_bitwidth == 8:
+            return (16, 16, 32)
+        else:
+            return (16, 16, 16)
+    return check_dot_compatibility
 
 def get_supported_sparse_dot_dtypes(target: GPUTarget):
-    return lambda input_dtype: input_dtype.name in ("fp16", "bf16", "fp8e5", "fp8e4nv")
-
+    # TODO: enable sparse dot on NVIDIA
+    #return lambda input_dtype: input_dtype.name in ("fp16", "bf16", "fp8e5", "fp8e4nv")
+    return lambda input_dtype: False
 
 @functools.lru_cache()
 def _path_to_binary(binary: str):
@@ -214,6 +226,7 @@ class CUDABackend(BaseBackend):
             "convert_custom_types":
             cuda.convert_custom_float8_sm80 if capability >= 80 else cuda.convert_custom_float8_sm70,
             "min_dot_size": min_dot_size(self.target),
+            "min_sparse_dot_size": min_dot_size(self.target),
             "get_sparse_dot_dtypes": get_supported_sparse_dot_dtypes(self.target),
         }
         return codegen_fns

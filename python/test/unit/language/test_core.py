@@ -13,6 +13,7 @@ import torch
 import os
 import inspect
 from numpy.random import RandomState
+import random
 
 import triton
 import triton.language as tl
@@ -3584,6 +3585,15 @@ def get_test_dot_double_rate_cases():
             (16, 16, 32, 4, False, False, 'None', 'ieee', 'bfloat16', 'float32', 1, None)]
 
 
+# M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
+def get_test_dot_sparse_base_cases():
+    return [(*shape, 4, False, False, epilogue, in_dtype, out_dtype, 1, None)
+            for shape in [(64, 64, 64), (32, 32, 32), (16, 16, 64)]
+            for epilogue in ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot']
+            # TODO: On MI300 there is an issue with ('float8e4b8', 'float8e4b8') due to an unsupported conversion
+            # float8e4b8 --> FP32 with RTNE
+            for in_dtype, out_dtype in [('float16', 'float16'), ('bfloat16', 'bfloat16'), ('float8e4b8', 'float8e4b8')]]
+
 @pytest.mark.interpreter
 @pytest.mark.parametrize(
     "M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size",
@@ -3604,26 +3614,12 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
         if in_dtype == 'bfloat16':
             pytest.skip("bfloat16 is not supported in the interpreter")
     else:
-        if not is_hip() and (M < 16 or N < 16 or K < 16):
-            pytest.skip("small dots are supported only on HIP at the moment")
-        if is_cuda():
-            capability = torch.cuda.get_device_capability()
+        if is_hip() and (M < 16 or N < 16 or K < 32):
+            pytest.skip("sparse dot size is too small")
 
-            if capability[0] < 7:
-                pytest.skip("Only test tl.dot() on devices with sm >= 70")
-            if capability[0] < 8:
-                if capability[1] == 0 and in_dtype == 'int8':
-                    pytest.skip("Only test int8 on devices with sm >= 75")
-                if input_precision != "ieee":
-                    pytest.skip("Only test tf32 on devices with sm >= 80")
-            if capability[0] == 7:
-                if (M, N, K, num_warps) in [(128, 256, 32, 8), (64, 128, 128, 4), (64, 128, 128, 2)]:
-                    pytest.skip("shared memory out of resource")
-                if out_dtype == 'float16':
-                    # TODO: support out_dtype=float16 for tl.dot on V100
-                    pytest.skip("Only test out_dtype=float16 on devices with sm >=80")
-            if capability[0] < 9 and in_dtype == 'float8e4nv':
-                pytest.skip("float8e4nv not supported on sm <= 80")
+        # TODO: enable sparse dot for NVIDIA, check for compatibility
+        if is_cuda():
+            pass
 
         if is_hip():
             if in_dtype in ("float8e5", "float8e4nv") and not is_hip_cdna4():
@@ -4093,6 +4089,307 @@ def test_scaled_dot(M, N, K, col_a, col_b, rhs_scale, mxfp_type, normal_type, nu
             assert 'st.global.v4' in ptx
         assert (re.search(r'(mma|wgmma.mma_async).sync.aligned.m\d+n\d+k16(?:.row.col)?.f32.(f|bf)16.(f|bf)16', ptx)
                 or "tcgen05.mma.cta_group::1.kind::f16" in ptx)
+
+@pytest.mark.interpreter
+@pytest.mark.parametrize(
+    "M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dtype, kpack, mma_nonk_size",
+    get_test_dot_sparse_base_cases())
+@pytest.mark.parametrize("num_ctas", num_ctas_list)
+def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dtype, kpack, mma_nonk_size,
+             num_ctas, device):
+    if is_interpreter():
+        pytest.skip("interpreter is not supported for dot sparse")
+    else:
+        if (M < 16 or N < 16 or K < 16):
+            pytest.skip("small sparse dot is not supported")
+        if is_cuda():
+            capability = torch.cuda.get_device_capability()
+
+            if capability[0] < 7:
+                pytest.skip("Only test tl.dot() on devices with sm >= 70")
+            if capability[0] < 8:
+                if capability[1] == 0 and in_dtype == 'int8':
+                    pytest.skip("Only test int8 on devices with sm >= 75")
+            if capability[0] == 7:
+                if (M, N, K, num_warps) in [(128, 256, 32, 8), (64, 128, 128, 4), (64, 128, 128, 2)]:
+                    pytest.skip("shared memory out of resource")
+                if out_dtype == 'float16':
+                    # TODO: support out_dtype=float16 for tl.dot on V100
+                    pytest.skip("Only test out_dtype=float16 on devices with sm >=80")
+            if capability[0] < 9 and in_dtype == 'float8e4nv':
+                pytest.skip("float8e4nv not supported on sm <= 80")
+
+        if is_hip():
+            if in_dtype in ("float8e5", "float8e4nv") and not is_hip_cdna4():
+                pytest.skip(f"{in_dtype} only supported on CDNA4")
+            if in_dtype in ("float8e5b16", "float8e4b8") and not is_hip_cdna3():
+                pytest.skip(f"{in_dtype} only supported on CDNA3")
+            if kpack == 2 and in_dtype == 'int8' and K < 64:
+                pytest.skip("kpack too large for K")
+        if not is_hip() and kpack == 2:
+            pytest.skip("Skip duplicated tests on nv path")
+
+
+    if num_ctas > 1 and in_dtype == 'int8':
+        # FIXME: mma v2 with num_ctas > 1 does not work
+        pytest.skip()
+    # triton kernel
+    @triton.jit
+    def kernel(X, stride_xm, stride_xk, xMeta, stride_xMetam, stride_xMetak, Y, stride_yk, stride_yn, W, stride_wn, stride_wl, Z, stride_zm, stride_zn,
+               BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, ADD_MATRIX: tl.constexpr,
+               ADD_ROWS: tl.constexpr, ADD_COLS: tl.constexpr, DO_SOFTMAX: tl.constexpr,
+               CHAIN_DOT: tl.constexpr, COL_A: tl.constexpr, COL_B: tl.constexpr, out_dtype: tl.constexpr = tl.float32):
+        off_m = tl.arange(0, BLOCK_M)
+        off_n = tl.arange(0, BLOCK_N)
+        off_l = tl.arange(0, BLOCK_N)
+        off_k = tl.arange(0, BLOCK_K)
+
+        off_k_x = tl.arange(0, BLOCK_K // 2)
+        off_k_xMeta = tl.arange(0, BLOCK_K // 16)
+
+        Xs = X + off_m[:, None] * stride_xm + off_k_x[None, :] * stride_xk
+        XsMeta = xMeta + off_m[:, None] * stride_xMetam + off_k_xMeta[None, :] * stride_xMetak
+        Ys = Y + off_k[:, None] * stride_yk + off_n[None, :] * stride_yn
+        Ws = W + off_n[:, None] * stride_wn + off_l[None, :] * stride_wl
+        Zs = Z + off_m[:, None] * stride_zm + off_n[None, :] * stride_zn
+        x = tl.load(Xs)
+        xMetadata = tl.load(XsMeta)
+        y = tl.load(Ys)
+        # The first dot is sparse
+        z = tl.dot_sparse(x, y, xMetadata)
+        if ADD_MATRIX:
+            z += tl.load(Zs)
+        if ADD_ROWS:
+            ZRs = Z + off_m * stride_zm
+            z += tl.load(ZRs)[:, None]
+        if ADD_COLS:
+            ZCs = Z + off_n * stride_zn
+            z += tl.load(ZCs)[None, :]
+        if DO_SOFTMAX:
+            max = tl.max(z, 1)
+            z = z - max[:, None]
+            num = tl.exp(z.to(tl.float32)).to(max.dtype)
+            den = tl.sum(num, 1)
+            z = num / den[:, None]
+        if CHAIN_DOT:
+            w = tl.load(Ws)
+            # To simplify this test, this dot is dense
+            z = tl.dot(z.to(w.dtype), w, out_dtype=out_dtype)
+        tl.store(Zs, z)
+
+    def make_sparse(A):
+        assert len(A.shape) == 2
+        assert A.shape[-1] % 4 == 0
+        assert A.is_contiguous()
+        constant = 0
+        for i in range(A.shape[0]):
+            indices_to_zero = []
+            for j in range(0, A.shape[1], 4):
+                # Randomly zero 2 out of 4 consecutive elements
+                indices_to_zero.extend(random.sample([j, j + 1, j + 2, j + 3], 2))
+            constant += 1
+            A[i, indices_to_zero] = 0
+        return A
+
+    def compress(A):
+        assert len(A.shape) == 2
+        assert A.shape[-1] % 4 == 0
+        assert A.is_contiguous()
+        flat = A.flatten().cpu().detach().numpy()
+        nonzero_indices = []
+        meta_nibbles = []
+
+        for outerIdx in range(0, len(flat), 4):
+            nibble = 0
+            nonzeroCount = 0
+            for innerIdx in range(4):
+                val = flat[outerIdx + innerIdx]
+                if val != 0:
+                    nonzero_indices.append(outerIdx + innerIdx)
+                    nibble |= innerIdx << (2 * nonzeroCount)
+                    nonzeroCount += 1
+                    if nonzeroCount > 2:
+                        raise Exception("too many nonzeros!")
+
+            if nonzeroCount == 0:
+                nibble |= 0b0100
+                nonzero_indices.extend([outerIdx + 0, outerIdx + 1])
+
+            if nonzeroCount == 1:
+                last_nonzero = nonzero_indices[-1]
+                if last_nonzero == outerIdx + 3:
+                    assert nibble == 0b0011
+                    nibble = 0b1100
+                    nonzero_indices[-1] = outerIdx + 0
+                    nonzero_indices.append(outerIdx + 3)
+                else:
+                    nibble |= 0b1100
+                    nonzero_indices.append(outerIdx + 3)
+
+            meta_nibbles.append(nibble)
+
+        assert len(meta_nibbles) == len(flat) // 4
+        assert len(nonzero_indices) == len(flat) // 2
+
+        metas = []
+        for outerIdx in range(0, len(meta_nibbles), 4):
+            meta = 0
+            meta |= meta_nibbles[outerIdx + 0] << 0
+            meta |= meta_nibbles[outerIdx + 1] << 4
+            meta |= meta_nibbles[outerIdx + 2] << 8
+            meta |= meta_nibbles[outerIdx + 3] << 12
+            metas.append(meta)
+
+        aSparse = (A.flatten()[nonzero_indices]).reshape(A.shape[0], A.shape[1] // 2)
+        aMeta = torch.tensor(np.array(metas, dtype=np.uint16).astype(np.int16)).reshape(
+            A.shape[0], A.shape[1] // 16
+        )
+        return aSparse.cuda(), aMeta.cuda()
+
+    # TODO: make this use numpy instead of torch?
+    # Right now, this is a GPU-only test (AMD, NVIDIA)
+    # We are going to:
+    # 1) Make x sparse
+    # 2) Generate the compression metadata matrix input for the sparse X matrix
+    # 3) Our numpy reference will run on dense inputs
+    #    which are numerically equivalent to sparse dot, but slower.
+
+    rs = RandomState(17)
+
+    # Quick remapping of string dtype to torch dtype
+    lookup_dtype = {
+        "float8e4b8": "float8_e4m3fnuz",
+        "float16": "float16",
+        "bfloat16": "bfloat16",
+    }
+
+    torch_dtype = getattr(torch, lookup_dtype[in_dtype])
+
+    # Our compression function is written in numpy, so it only works with numpy dtypes.
+    # We will cast to the real dtype later.
+    if torch_dtype == torch.bfloat16:
+        temp_dtype = torch.float16
+    elif "float8" in in_dtype:
+        temp_dtype = torch.float16
+    else:
+        temp_dtype = torch_dtype
+
+    if col_a:
+        # x = numpy_random((K, M), dtype_str=in_dtype, rs=rs).T
+        x = make_sparse(torch.randn((K, M), device="cuda", dtype=temp_dtype))
+    else:
+        # x = numpy_random((M, K), dtype_str=in_dtype, rs=rs)
+        x = make_sparse(torch.randn((M, K), device="cuda", dtype=temp_dtype))
+    if col_b:
+        y = numpy_random((N, K), dtype_str=in_dtype, rs=rs).T
+    else:
+        y = numpy_random((K, N), dtype_str=in_dtype, rs=rs)
+    w = numpy_random((N, N), dtype_str=in_dtype, rs=rs)
+
+    if 'int' not in in_dtype and 'float8' not in in_dtype:
+        x *= .1
+        y *= .1
+
+    # aSparse is only used on the GPU
+    xSparse, xMeta = compress(x)
+
+    # if we casted to float16 earlier, cast back now
+    if torch_dtype == torch.bfloat16:
+        xSparse = xSparse.to(torch.bfloat16)
+    elif torch_dtype == torch.float8_e4m3fnuz:
+        xSparse = xSparse.to(torch.float8_e4m3fnuz)
+        x = x.to(torch.float8_e4m3fnuz)
+
+    # convert x back to numpy for the CPU ref
+    if not 'float8' in in_dtype:
+        x = x.cpu().detach().numpy()
+
+    x_tri = xSparse
+    y_tri = to_triton(y, device=device, dst_type=in_dtype)
+    w_tri = to_triton(w, device=device, dst_type=in_dtype)
+    print (w_tri.dtype)
+    # triton result
+    if out_dtype == 'int8':
+        z = 1 + numpy_random((M, N), dtype_str='int32', rs=rs)
+    else:
+        z = 1 + numpy_random((M, N), dtype_str=in_dtype, rs=rs) * .1
+
+    z_tri = to_triton(z, device=device)
+    if epilogue == 'trans':
+        z_tri = torch.as_strided(z_tri, (M, N), [1, M])
+
+    if out_dtype == 'int8':
+        out_dtype = tl.int8
+    elif out_dtype == 'float16' and epilogue != 'softmax':
+        # TODO: for out_dtype == 'float16' and epilogue == 'softmax', it will
+        # fail with the following error: 'llvm.fmul' op requires the same type
+        # for all operands and results
+        out_dtype = tl.float16
+    else:
+        out_dtype = tl.float32
+
+    kern_kwargs = {
+        'COL_A': col_a, 'COL_B': col_b, 'BLOCK_M': M, 'BLOCK_K': K, 'BLOCK_N': N, 'ADD_MATRIX':
+        epilogue == 'add-matrix', 'ADD_ROWS': epilogue == 'add-rows', 'ADD_COLS': epilogue == 'add-cols', 'DO_SOFTMAX':
+        epilogue == 'softmax', 'CHAIN_DOT': epilogue == 'chain-dot', 'num_warps':
+        num_warps, 'num_ctas': num_ctas, 'out_dtype': out_dtype
+    }
+
+    if is_hip():
+        kern_kwargs['kpack'] = kpack
+        if mma_nonk_size is not None:
+            kern_kwargs['matrix_instr_nonkdim'] = mma_nonk_size
+
+    pgm = kernel[(1, 1)](x_tri, x_tri.stride(0), x_tri.stride(1), xMeta, xMeta.stride(0), xMeta.stride(1), y_tri, y_tri.stride(0), y_tri.stride(1), w_tri,
+                         w_tri.stride(0), w_tri.stride(1), z_tri, z_tri.stride(0), z_tri.stride(1), **kern_kwargs)
+
+    # torch result
+    if in_dtype == 'int8':
+        z_ref = np.matmul(x.astype(np.float32), y.astype(np.float32())).astype(np.int32)
+    elif 'float8' in in_dtype:
+        # We generated float16 inputs for x originally, to deal with numpy limitations
+        #x = torch.tensor(x, device=device).view(torch.float16).to(torch.float32)
+        x = convert_fp8_to_fp32(x, device, in_dtype)
+        y = convert_fp8_to_fp32(y, device, in_dtype)
+        z_ref = to_numpy(torch.matmul(x, y))
+    else:
+        z_ref = np.matmul(x, y)
+
+    if epilogue == 'add-matrix':
+        z_ref += z
+    if epilogue == 'add-rows':
+        z_ref += z[:, 0][:, None]
+    if epilogue == 'add-cols':
+        z_ref += z[0, :][None, :]
+    if epilogue == 'softmax':
+        num = np.exp(z_ref - np.max(z_ref, axis=-1, keepdims=True))
+        denom = np.sum(num, axis=-1, keepdims=True)
+        z_ref = num / denom
+    if epilogue == 'chain-dot':
+        if 'float8' in in_dtype:
+            # Reduce z_ref's precision to fp8 to match the kernel behavior
+            if in_dtype == 'float8e4nv':
+                z_fp8 = torch.tensor(z_ref, dtype=torch.float8_e4m3fn)
+            elif in_dtype == 'float8e5':
+                z_fp8 = torch.tensor(z_ref, dtype=torch.float8_e5m2)
+            elif in_dtype == 'float8e4b8':
+                z_fp8 = torch.tensor(z_ref, dtype=torch.float8_e4m3fnuz)
+            elif in_dtype == 'float8e5b16':
+                z_fp8 = torch.tensor(z_ref, dtype=torch.float8_e5m2fnuz)
+            else:
+                assert "Unsupported float8 dtype"
+            z_ref = to_numpy(z_fp8.to(torch.float32))
+            w = to_numpy(convert_fp8_to_fp32(w, device, in_dtype))
+        z_ref = np.matmul(z_ref, w)
+    # compare
+    if in_dtype == 'float32':
+        # XXX: Somehow there's a larger difference when we use float32
+        np.testing.assert_allclose(z_ref, to_numpy(z_tri), rtol=0.01, atol=1e-3)
+    elif out_dtype == tl.float16 or in_dtype == 'bfloat16':
+        np.testing.assert_allclose(z_ref, to_numpy(z_tri), rtol=0.01, atol=1e-2)
+    else:
+        # added atol, to loose precision for float16xfloat16->float32 case
+        np.testing.assert_allclose(z_ref, to_numpy(z_tri), rtol=0.01, atol=1e-3)
 
 
 @pytest.mark.interpreter

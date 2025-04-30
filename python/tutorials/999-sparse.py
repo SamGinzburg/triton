@@ -11,16 +11,17 @@ torch.manual_seed(42)
 
 import triton
 import triton.language as tl
-
 """
 Triton autotuning for function matmul_kernel_sparse finished after 98.81s; best config selected: BLOCK_SIZE_M: 128, BLOCK_SIZE_N: 128, BLOCK_SIZE_K: 64, GROUP_SIZE_M: 2, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: None;
 """
+
+
 def get_autotune_config():
     configs = []
-    for BLOCK_M in [16,32,64,128]:
-        for BLOCK_N in [16,32,64,128]:
-            for BLOCK_K in [16,32,64,128]:
-                for num_warps in [1,2,4,8]:
+    for BLOCK_M in [16, 32, 64, 128]:
+        for BLOCK_N in [16, 32, 64, 128]:
+            for BLOCK_K in [16, 32, 64, 128]:
+                for num_warps in [1, 2, 4, 8]:
                     for num_stages in [1]:
                         for GROUP_SIZE_M in [4]:
                             configs.append(
@@ -34,8 +35,7 @@ def get_autotune_config():
                                     },
                                     num_stages=num_stages,
                                     num_warps=num_warps,
-                                ),
-                            )
+                                ), )
     # configs = [
     #     triton.Config(
     #         {
@@ -56,11 +56,9 @@ def get_autotune_config():
 #     configs=get_autotune_config(),
 #     key=["M", "N", "K"],
 # )
-@triton.heuristics(
-    values={
-        "EVEN_K": lambda args: args["K"] % args["BLOCK_SIZE_K"] == 0,
-    }
-)
+@triton.heuristics(values={
+    "EVEN_K": lambda args: args["K"] % args["BLOCK_SIZE_K"] == 0,
+})
 @triton.jit
 def matmul_kernel_sparse(
     # Pointers to matrices
@@ -133,9 +131,7 @@ def matmul_kernel_sparse(
     offs_k_aMeta = tl.arange(0, BLOCK_SIZE_K_A_META)
     a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k_a[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k_b[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-    aMeta_ptrs = a_meta_ptr + (
-        offs_am[:, None] * stride_aMeta_m + offs_k_aMeta[None, :] * stride_aMeta_k
-    )
+    aMeta_ptrs = a_meta_ptr + (offs_am[:, None] * stride_aMeta_m + offs_k_aMeta[None, :] * stride_aMeta_k)
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
     # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
@@ -146,9 +142,7 @@ def matmul_kernel_sparse(
         if EVEN_K:
             a = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
-            aMeta = tl.load(
-                aMeta_ptrs
-            )
+            aMeta = tl.load(aMeta_ptrs)
         else:
             # Load the next block of A and B, generate a mask by checking the K dimension.
             # If it is out of bounds, set it to 0.
@@ -248,9 +242,7 @@ def compress(A):
         metas.append(meta)
 
     aSparse = (A.flatten()[nonzero_indices]).reshape(A.shape[0], A.shape[1] // 2)
-    aMeta = torch.tensor(np.array(metas, dtype=np.uint16).astype(np.int16)).reshape(
-        A.shape[0], A.shape[1] // 16
-    )
+    aMeta = torch.tensor(np.array(metas, dtype=np.uint16).astype(np.int16)).reshape(A.shape[0], A.shape[1] // 16)
     return aSparse.cuda(), aMeta.cuda()
 
 
@@ -267,9 +259,7 @@ def matmul(aSparse, aMeta, b, config):
     # Allocates output.
     c = torch.zeros((M, N), device=b.device, dtype=acc_dtype)
     # 1D launch kernel where each block gets its own program.
-    grid = lambda META: (
-        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-    )
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]), )
     block_m = config.kwargs['BLOCK_SIZE_M']
     block_n = config.kwargs['BLOCK_SIZE_N']
     block_k = config.kwargs['BLOCK_SIZE_K']
@@ -291,20 +281,21 @@ def matmul(aSparse, aMeta, b, config):
         c.stride(1),  #
         aMeta.stride(0),
         aMeta.stride(1),
-        BLOCK_SIZE_M = block_m,
-        BLOCK_SIZE_N = block_n,
-        BLOCK_SIZE_K = block_k,
-        GROUP_SIZE_M = group_m,
-        matrix_instr_nonkdim = nonk_dim,
-        num_stages = config.num_stages,
-        num_warps = config.num_warps,
-        USE_BF16 = acc_dtype is torch.bfloat16,
+        BLOCK_SIZE_M=block_m,
+        BLOCK_SIZE_N=block_n,
+        BLOCK_SIZE_K=block_k,
+        GROUP_SIZE_M=group_m,
+        matrix_instr_nonkdim=nonk_dim,
+        num_stages=config.num_stages,
+        num_warps=config.num_warps,
+        USE_BF16=acc_dtype is torch.bfloat16,
     )
 
     return c
 
+
 def test_sparse_matrix(dtype):
-    print ("Testing dtype: ", str(dtype))
+    print("Testing dtype: ", str(dtype))
     torch.manual_seed(42)
     test_dim = 512 + 16
 
@@ -319,16 +310,17 @@ def test_sparse_matrix(dtype):
     b = b.T.contiguous().T
 
     print("Autotuning... set TRITON_PRINT_AUTOTUNING=1 to see logs here...")
-    print ("aMeta: ", aMeta)
+    print("aMeta: ", aMeta)
 
     if dtype == torch.float8_e4m3fnuz:
         one_device = torch.tensor(1.0, device=a.device)
-        torch_output = torch._scaled_mm(a, b, scale_a=one_device, scale_b=one_device, out_dtype=torch.float16, use_fast_accum=True)
+        torch_output = torch._scaled_mm(a, b, scale_a=one_device, scale_b=one_device, out_dtype=torch.float16,
+                                        use_fast_accum=True)
     else:
         torch_output = torch.matmul(a, b)
 
     for config in get_autotune_config():
-        print ("Config: ", config)
+        print("Config: ", config)
         triton_output = matmul(aSparse, aMeta, b, config)
         print(f"config = {config}")
 
@@ -341,10 +333,10 @@ def test_sparse_matrix(dtype):
             # print ("torch output: ", torch_output)
         else:
             print("FAILED: Triton and Torch differ! ❌")
-            print ("Triton output: ", triton_output)
-            print ("torch output: ", torch_output)
+            print("Triton output: ", triton_output)
+            print("torch output: ", torch_output)
 
-    print(f"report best performance")
+    print("report best performance")
     best_triton_flops = 0.0
     for config in get_autotune_config():
         ms = triton.testing.do_bench(lambda: matmul(aSparse, aMeta, b, config))
@@ -353,7 +345,8 @@ def test_sparse_matrix(dtype):
     print(f"Triton Perf: {best_triton_flops} TFLOPS")
 
     if dtype == torch.float8_e4m3fnuz:
-        ms_torch = triton.testing.do_bench(lambda: torch._scaled_mm(a, b, scale_a=one_device, scale_b=one_device, out_dtype=torch.float16, use_fast_accum=True))
+        ms_torch = triton.testing.do_bench(lambda: torch._scaled_mm(a, b, scale_a=one_device, scale_b=one_device,
+                                                                    out_dtype=torch.float16, use_fast_accum=True))
     else:
         ms_torch = triton.testing.do_bench(lambda: torch.matmul(a, b))
     flops = 2 * test_dim * test_dim * test_dim * 1e-12 / (ms_torch * 1e-3)
