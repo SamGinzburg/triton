@@ -3617,12 +3617,25 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
         if in_dtype == 'bfloat16':
             pytest.skip("bfloat16 is not supported in the interpreter")
     else:
-        if is_hip() and (M < 16 or N < 16 or K < 32):
-            pytest.skip("sparse dot size is too small")
-
-        # TODO: enable sparse dot for NVIDIA, check for compatibility
+        if not is_hip() and (M < 16 or N < 16 or K < 16):
+            pytest.skip("small dots are supported only on HIP at the moment")
         if is_cuda():
-            pass
+            capability = torch.cuda.get_device_capability()
+            if capability[0] < 7:
+                pytest.skip("Only test tl.dot() on devices with sm >= 70")
+            if capability[0] < 8:
+                if capability[1] == 0 and in_dtype == 'int8':
+                    pytest.skip("Only test int8 on devices with sm >= 75")
+                if input_precision != "ieee":
+                    pytest.skip("Only test tf32 on devices with sm >= 80")
+            if capability[0] == 7:
+                if (M, N, K, num_warps) in [(128, 256, 32, 8), (64, 128, 128, 4), (64, 128, 128, 2)]:
+                    pytest.skip("shared memory out of resource")
+                if out_dtype == 'float16':
+                    # TODO: support out_dtype=float16 for tl.dot on V100
+                    pytest.skip("Only test out_dtype=float16 on devices with sm >=80")
+            if capability[0] < 9 and in_dtype == 'float8e4nv':
+                pytest.skip("float8e4nv not supported on sm <= 80")
 
         if is_hip():
             if in_dtype in ("float8e5", "float8e4nv") and not is_hip_cdna4():

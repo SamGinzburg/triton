@@ -1076,8 +1076,7 @@ def AMDCompressionMfmaEncodingAttr : DistributedEncoding<"AMDCompressionMfmaEnco
 
   let description = [{
     This is an encoding of the "compression"-matrix input for smfmac instructions. It is the metadata that
-    describes which 2 out of 4 elements in the sparse A-input are sparse. It is indexed into with the abid operand and
-    has shape [M, K / 4] as there is one element for every 2 elements in the sparse A input on the K-dim.
+    describes which 2 out of 4 elements in the sparse A-input are zero.
   }];
 
   let parameters = (

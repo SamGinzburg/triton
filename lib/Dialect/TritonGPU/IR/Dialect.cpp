@@ -1862,14 +1862,8 @@ void AMDRotatingSharedEncodingAttr::print(AsmPrinter &printer) const {
 }
 
 //===----------------------------------------------------------------------===//
-// Sparse Mfma encoding
+// Compression Mfma encoding
 //===----------------------------------------------------------------------===//
-// TODO: there is a lot of common code with MmaEncoding here
-
-//===----------------------------------------------------------------------===//
-// Mfma encoding
-//===----------------------------------------------------------------------===//
-// TODO: there is a lot of common code with MmaEncoding here
 
 SmallVector<unsigned> AMDCompressionMfmaEncodingAttr::getCTAsPerCGA() const {
   return SmallVector<unsigned>(getCTALayout().getCTAsPerCGA());
