@@ -3587,12 +3587,15 @@ def get_test_dot_double_rate_cases():
 
 # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
 def get_test_dot_sparse_base_cases():
-    return [(*shape, 4, False, False, epilogue, in_dtype, out_dtype, 1, None)
-            for shape in [(64, 64, 64), (32, 32, 32), (16, 16, 64)]
-            for epilogue in ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot']
-            # TODO: On MI300 there is an issue with ('float8e4b8', 'float8e4b8') due to an unsupported conversion
-            # float8e4b8 --> FP32 with RTNE
-            for in_dtype, out_dtype in [('float16', 'float16'), ('bfloat16', 'bfloat16'), ('float8e4b8', 'float8e4b8')]]
+    return [
+        (*shape, 4, False, False, epilogue, in_dtype, out_dtype, 1, None)
+        for shape in [(64, 64, 64), (32, 32, 32), (16, 16, 64)]
+        for epilogue in ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot']
+        # TODO: On MI300 there is an issue with ('float8e4b8', 'float8e4b8') due to an unsupported conversion
+        # float8e4b8 --> FP32 with RTNE
+        for in_dtype, out_dtype in [('float16', 'float16'), ('bfloat16', 'bfloat16'), ('float8e4b8', 'float8e4b8')]
+    ]
+
 
 @pytest.mark.interpreter
 @pytest.mark.parametrize(
@@ -4090,13 +4093,13 @@ def test_scaled_dot(M, N, K, col_a, col_b, rhs_scale, mxfp_type, normal_type, nu
         assert (re.search(r'(mma|wgmma.mma_async).sync.aligned.m\d+n\d+k16(?:.row.col)?.f32.(f|bf)16.(f|bf)16', ptx)
                 or "tcgen05.mma.cta_group::1.kind::f16" in ptx)
 
+
 @pytest.mark.interpreter
-@pytest.mark.parametrize(
-    "M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dtype, kpack, mma_nonk_size",
-    get_test_dot_sparse_base_cases())
+@pytest.mark.parametrize("M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dtype, kpack, mma_nonk_size",
+                         get_test_dot_sparse_base_cases())
 @pytest.mark.parametrize("num_ctas", num_ctas_list)
-def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dtype, kpack, mma_nonk_size,
-             num_ctas, device):
+def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dtype, kpack, mma_nonk_size, num_ctas,
+                    device):
     if is_interpreter():
         pytest.skip("interpreter is not supported for dot sparse")
     else:
@@ -4132,15 +4135,14 @@ def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dt
         if not is_hip() and kpack == 2:
             pytest.skip("Skip duplicated tests on nv path")
 
-
     if num_ctas > 1 and in_dtype == 'int8':
         # FIXME: mma v2 with num_ctas > 1 does not work
         pytest.skip()
     # triton kernel
     @triton.jit
-    def kernel(X, stride_xm, stride_xk, xMeta, stride_xMetam, stride_xMetak, Y, stride_yk, stride_yn, W, stride_wn, stride_wl, Z, stride_zm, stride_zn,
-               BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, ADD_MATRIX: tl.constexpr,
-               ADD_ROWS: tl.constexpr, ADD_COLS: tl.constexpr, DO_SOFTMAX: tl.constexpr,
+    def kernel(X, stride_xm, stride_xk, xMeta, stride_xMetam, stride_xMetak, Y, stride_yk, stride_yn, W, stride_wn,
+               stride_wl, Z, stride_zm, stride_zn, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+               ADD_MATRIX: tl.constexpr, ADD_ROWS: tl.constexpr, ADD_COLS: tl.constexpr, DO_SOFTMAX: tl.constexpr,
                CHAIN_DOT: tl.constexpr, COL_A: tl.constexpr, COL_B: tl.constexpr, out_dtype: tl.constexpr = tl.float32):
         off_m = tl.arange(0, BLOCK_M)
         off_n = tl.arange(0, BLOCK_N)
@@ -4244,9 +4246,7 @@ def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dt
             metas.append(meta)
 
         aSparse = (A.flatten()[nonzero_indices]).reshape(A.shape[0], A.shape[1] // 2)
-        aMeta = torch.tensor(np.array(metas, dtype=np.uint16).astype(np.int16)).reshape(
-            A.shape[0], A.shape[1] // 16
-        )
+        aMeta = torch.tensor(np.array(metas, dtype=np.uint16).astype(np.int16)).reshape(A.shape[0], A.shape[1] // 16)
         return aSparse.cuda(), aMeta.cuda()
 
     # TODO: make this use numpy instead of torch?
@@ -4304,13 +4304,13 @@ def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dt
         x = x.to(torch.float8_e4m3fnuz)
 
     # convert x back to numpy for the CPU ref
-    if not 'float8' in in_dtype:
+    if 'float8' not in in_dtype:
         x = x.cpu().detach().numpy()
 
     x_tri = xSparse
     y_tri = to_triton(y, device=device, dst_type=in_dtype)
     w_tri = to_triton(w, device=device, dst_type=in_dtype)
-    print (w_tri.dtype)
+    print(w_tri.dtype)
     # triton result
     if out_dtype == 'int8':
         z = 1 + numpy_random((M, N), dtype_str='int32', rs=rs)
@@ -4334,8 +4334,8 @@ def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dt
     kern_kwargs = {
         'COL_A': col_a, 'COL_B': col_b, 'BLOCK_M': M, 'BLOCK_K': K, 'BLOCK_N': N, 'ADD_MATRIX':
         epilogue == 'add-matrix', 'ADD_ROWS': epilogue == 'add-rows', 'ADD_COLS': epilogue == 'add-cols', 'DO_SOFTMAX':
-        epilogue == 'softmax', 'CHAIN_DOT': epilogue == 'chain-dot', 'num_warps':
-        num_warps, 'num_ctas': num_ctas, 'out_dtype': out_dtype
+        epilogue == 'softmax', 'CHAIN_DOT': epilogue == 'chain-dot', 'num_warps': num_warps, 'num_ctas': num_ctas,
+        'out_dtype': out_dtype
     }
 
     if is_hip():
@@ -4343,8 +4343,9 @@ def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dt
         if mma_nonk_size is not None:
             kern_kwargs['matrix_instr_nonkdim'] = mma_nonk_size
 
-    pgm = kernel[(1, 1)](x_tri, x_tri.stride(0), x_tri.stride(1), xMeta, xMeta.stride(0), xMeta.stride(1), y_tri, y_tri.stride(0), y_tri.stride(1), w_tri,
-                         w_tri.stride(0), w_tri.stride(1), z_tri, z_tri.stride(0), z_tri.stride(1), **kern_kwargs)
+    pgm = kernel[(1, 1)](x_tri, x_tri.stride(0), x_tri.stride(1), xMeta, xMeta.stride(0), xMeta.stride(1), y_tri,
+                         y_tri.stride(0), y_tri.stride(1), w_tri, w_tri.stride(0), w_tri.stride(1), z_tri,
+                         z_tri.stride(0), z_tri.stride(1), **kern_kwargs)
 
     # torch result
     if in_dtype == 'int8':

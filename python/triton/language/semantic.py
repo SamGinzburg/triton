@@ -1613,7 +1613,8 @@ def dot_sparse(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
     assert lhs_rank == rhs_rank == 2, f"Both inputs must be 2D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
     assert lhs.shape[-1].value * 2 == rhs.shape[
         -2].value, f"First input shape {lhs.shape} and second input shape {rhs.shape} are not compatible for matmul (lhs: {lhs.shape} vs rhs: {rhs.shape})"
-    assert builder.codegen_fns.get("min_sparse_dot_size") is not None, "target doesn't provide lower shape bounds for sparse dot."
+    assert builder.codegen_fns.get(
+        "min_sparse_dot_size") is not None, "target doesn't provide lower shape bounds for sparse dot."
     min_dot_size = builder.codegen_fns["min_sparse_dot_size"](lhs.type, rhs.type)
     assert lhs.shape[-2].value >= min_dot_size[0] and lhs.shape[-1].value >= min_dot_size[2] \
         and rhs.shape[-1].value >= min_dot_size[1], \

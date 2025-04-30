@@ -28,6 +28,7 @@ def min_dot_size(target: GPUTarget):
 
     return check_dot_compatibility
 
+
 def min_sparse_dot_size(target: GPUTarget):
     # TODO: check sparse dot compatibility when we enable sparse dot on NVIDIA
     def check_dot_compatibility(lhs_type, rhs_type) -> Tuple[int, int, int]:  # [m, n, k]
@@ -38,12 +39,15 @@ def min_sparse_dot_size(target: GPUTarget):
             return (16, 16, 32)
         else:
             return (16, 16, 16)
+
     return check_dot_compatibility
+
 
 def get_supported_sparse_dot_dtypes(target: GPUTarget):
     # TODO: enable sparse dot on NVIDIA
     #return lambda input_dtype: input_dtype.name in ("fp16", "bf16", "fp8e5", "fp8e4nv")
     return lambda input_dtype: False
+
 
 @functools.lru_cache()
 def _path_to_binary(binary: str):
