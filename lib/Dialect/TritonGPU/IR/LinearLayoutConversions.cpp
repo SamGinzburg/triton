@@ -722,8 +722,17 @@ AMDCompressionMfmaEncodingAttr::toLinearLayout(ArrayRef<int64_t> shape) const {
         {outDimNames[order[0]], outDimNames[order[1]]});
   } else {
     assert(getMDim() == 16);
+    int32_t kSize = shape[rank - 1];
+    kSize = llvm::Log2_32(kSize) - 1;
+
+    // Start incrementing with {4, 0}, unlike the MDim == 32 case
+    std::vector<std::vector<int32_t>> registerBase;
+    for (int i = 1; i < kSize; i++) {
+      registerBase.push_back({1 << (i + 1), 0});
+    }
+
     tileLayout = LinearLayout(
-        {{kRegister, {{4, 0}}},
+        {{kRegister, registerBase},
          {kLane, {{0, 1}, {0, 2}, {0, 4}, {0, 8}, {1, 0}, {2, 0}}}},
         {outDimNames[order[0]], outDimNames[order[1]]});
   }

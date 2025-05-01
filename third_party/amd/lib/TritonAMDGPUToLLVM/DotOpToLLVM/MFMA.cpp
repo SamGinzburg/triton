@@ -869,40 +869,42 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
            "aMeta elems must be i16");
 
     auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
-    // SmallVector<Value> aMetaPacked(aMetaElems.size());
     SmallVector<Value> aMetaPacked;
 
-    auto sparseAElems = unpackLLElements(loc, loadedA, rewriter);
-    // How many elems do we need?
-    // e.g., If we have 4 elems per thread, but need 2, the stride should be 2.
-    auto elemStride = aMetaElems.size() / (numRepB * numRepM * numRepBK);
-    // smfma32 is determined by the K-dim and has a stride of 1
-    if (kDimInstrSize == 32)
-      elemStride = 1;
-
-    assert(elemStride >= 1 && "Computed elemStride should be positive");
+    /*
+    if (aMetaElems.size() % 2 == 0) {
+      for (auto elemIdx = 0;
+          elemIdx < aMetaElems.size();
+          elemIdx += 2) {
+        auto elemLower = tb.bitcast(aMetaElems[elemIdx], i16_ty);
+        auto elemUpper = tb.bitcast(aMetaElems[elemIdx + 1], i16_ty);
+        auto upper = tb.shl(tb.zext(i32_ty, elemUpper), tb.i32_val(16));
+        Value packed =
+           tb.or_(i32_ty, upper, tb.zext(i32_ty, elemLower));
+        aMetaPacked.push_back(packed);
+      }
+      */
 
     for (auto elemIdx = 0;
-         elemIdx < (numRepB * numRepM * numRepBK) * elemStride;
-         elemIdx += elemStride) {
-      auto elem = tb.bitcast(aMetaElems[elemIdx % aMetaElems.size()], i16_ty);
-      aMetaPacked.push_back(tb.zext(i32_ty, elem));
+        elemIdx < aMetaElems.size();
+        elemIdx++) {
+      auto elem = tb.bitcast(aMetaElems[elemIdx], i16_ty);
+      //aMetaPacked.push_back(tb.zext(i32_ty, elem));
+      aMetaPacked.push_back(elem);
     }
 
     auto aMetaShape = aMetaTensorTy.getShape();
     auto ty = LLVM::LLVMStructType::getLiteral(
-        rewriter.getContext(), SmallVector<Type>(aMetaPacked.size(), i32_ty));
+        rewriter.getContext(), SmallVector<Type>(aMetaPacked.size(), i16_ty));
     Value packedAMeta =
         packLLElements(loc, typeConverter, aMetaPacked, rewriter, ty);
-
-    unsigned long adjustKPack = kWidth / kBase;
 
     // The math for kWidth and kBase is "wrong", since we are loading 1 value
     // for every 2 smfmac ops. It's actually fine to do this here, since we've
     // already ensured these values are correct.
     auto operandAMeta = getValuesFromDotOperandLayoutStruct(
         packedAMeta, numRepB, numRepM, numRepBK,
-        /*kWidth=*/1u, /*kBase=*/1ul, i32_ty,
+        /*kWidth=*/1ul, /*kBase=*/1ul, i16_ty,
         /*allowXF32=*/false,
         /*preserveBF16=*/false);
 
@@ -934,6 +936,24 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           }
           acc = zeroAuxiliarBlocks(subBlocks, acc);
 
+          // Pack along the K-Dim if possible
+          // This is done to save registers (we can re-use a single VGPR for multiple sparse MFMA instructions)
+          auto canPackOnKDim = numRepBK % 2 == 0;
+          SmallVector<Value> packedMeta;
+          if (canPackOnKDim) {
+            for (int k = 0; k < numRepBK; k += 2) {
+              for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
+                auto valuesLower = tb.extract_element(i16_ty, operandAMeta[0][{b, m, k}], tb.i32_val(0));
+                auto valuesUpper = tb.extract_element(i16_ty, operandAMeta[0][{b, m, k + 1}], tb.i32_val(0));
+                auto upper = tb.shl(tb.zext(i32_ty, valuesUpper), tb.i32_val(16));
+                Value packed =
+                  tb.or_(i32_ty, upper, tb.zext(i32_ty, valuesLower));
+                packedMeta.push_back(packed);
+              }
+            }
+          }
+
+          auto aMetaIdx = 0;
           for (int k = 0; k < numRepBK; k++) {
             for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
               // "For every smfmac instruction if CBSZ[1:0]=0,
@@ -942,26 +962,24 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               //
               // reg_idx contains aMeta
               // abid selects the relevant sparsity metadata for the A input.
-              //
-              // reg_c = __builtin_amdgcn_smfmac_f32_32x32x16_bf16(reg_a,
-              // (sparse A input)
-              //                    reg_b,  (B input)
-              //                    reg_c,  (accumulator)
-              //                    reg_idx, <-- aMeta, all the indicies are in
-              //                    one VGPR 0, abid);
+              if (canPackOnKDim) {
+                auto packedMetadataInput = packedMeta[aMetaIdx / 4];
+                Value abid = tb.i32_val(aMetaIdx % 4);
+                acc = generateSparseMFMAOp(
+                    intrinsicName, operandA[kPack][{b, m, k}],
+                    operandB[kPack][{b, n, k}], acc, packedMetadataInput, abid);
 
-              // We fix kPack==2 for bf16/fp16 inputs, in reality we only load 1
-              // element per thread that is shared between two sparse mfma
-              // operations.
-              // TODO: We can reduce register pressure by packing I16s into I32
-              // values
-              auto values = operandAMeta[0][{b, m, k}];
-              auto metadata = tb.extract_element(i32_ty, values, tb.i32_val(0));
+                aMetaIdx++;
+              } else {
+                auto values = operandAMeta[0][{b, m, k}];
+                auto metadata = tb.extract_element(i16_ty, values, tb.i32_val(0));
+                auto zextMetadata = tb.zext(i32_ty, metadata);
 
-              Value abid = tb.i32_val(kPack % 2);
-              acc = generateSparseMFMAOp(
-                  intrinsicName, operandA[kPack][{b, m, k}],
-                  operandB[kPack][{b, n, k}], acc, metadata, abid);
+                Value abid = tb.i32_val(kPack % 2);
+                acc = generateSparseMFMAOp(
+                    intrinsicName, operandA[kPack][{b, m, k}],
+                    operandB[kPack][{b, n, k}], acc, zextMetadata, abid);
+              }
 
               if (!firstMfma)
                 firstMfma = acc;
