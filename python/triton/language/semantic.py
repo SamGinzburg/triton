@@ -1623,12 +1623,6 @@ def dot_sparse(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
     _0 = builder.get_fp32(0)
     ret_scalar_ty = tl.float32
 
-    # TODO: fix this
-    print("acc", acc)
-    print("lhs_meta", lhs_meta)
-
-    # assert builder.codegen_fns.get("sparse_dot_acc") is not None, "On AMD GPUs, the accumulator cannot be passed as an argument. Only `acc += tl.sparse_dot(A, B, aMeta)` is supported."
-
     M = lhs.type.shape[-2]
     N = rhs.type.shape[-1]
     ret_ty = tl.block_type(ret_scalar_ty, [M, N])
@@ -1641,7 +1635,8 @@ def dot_sparse(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
             # We only do this for AMD, where 2:4 sparse ops operate implicitly on the accumulator (i.e., they are all "accumulate" ops).
             # See: Section 7.4 in the MI300 ISA docs
             temp_acc_handle = builder.create_splat(_0, [M, N])
-            sparse_dot_result = tl.tensor(builder.create_dot_sparse(lhs.handle, rhs.handle, temp_acc_handle, lhs_meta.handle), ret_ty)
+            sparse_dot_result = tl.tensor(
+                builder.create_dot_sparse(lhs.handle, rhs.handle, temp_acc_handle, lhs_meta.handle), ret_ty)
             return tl.tensor(builder.create_fadd(sparse_dot_result.handle, acc_handle), ret_ty)
 
     return tl.tensor(builder.create_dot_sparse(lhs.handle, rhs.handle, acc_handle, lhs_meta.handle), ret_ty)

@@ -871,25 +871,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
     auto aMetaElems = unpackLLElements(loc, loadedAMeta, rewriter);
     SmallVector<Value> aMetaPacked;
 
-    /*
-    if (aMetaElems.size() % 2 == 0) {
-      for (auto elemIdx = 0;
-          elemIdx < aMetaElems.size();
-          elemIdx += 2) {
-        auto elemLower = tb.bitcast(aMetaElems[elemIdx], i16_ty);
-        auto elemUpper = tb.bitcast(aMetaElems[elemIdx + 1], i16_ty);
-        auto upper = tb.shl(tb.zext(i32_ty, elemUpper), tb.i32_val(16));
-        Value packed =
-           tb.or_(i32_ty, upper, tb.zext(i32_ty, elemLower));
-        aMetaPacked.push_back(packed);
-      }
-      */
-
-    for (auto elemIdx = 0;
-        elemIdx < aMetaElems.size();
-        elemIdx++) {
+    for (auto elemIdx = 0; elemIdx < aMetaElems.size(); elemIdx++) {
       auto elem = tb.bitcast(aMetaElems[elemIdx], i16_ty);
-      //aMetaPacked.push_back(tb.zext(i32_ty, elem));
       aMetaPacked.push_back(elem);
     }
 
@@ -937,19 +920,21 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
           acc = zeroAuxiliarBlocks(subBlocks, acc);
 
           // Pack along the K-Dim if possible
-          // This is done to save registers (we can re-use a single VGPR for multiple sparse MFMA instructions)
-          auto canPackOnKDim = numRepBK % 2 == 0;
+          // This is done to save registers (we can re-use a single VGPR for
+          // multiple sparse MFMA instructions)
+          auto canPackOnKDim = (numRepBK % 2 == 0);
           SmallVector<Value> packedMeta;
           if (canPackOnKDim) {
             for (int k = 0; k < numRepBK; k += 2) {
-              for (int kPack = 0; kPack < kWidth / kBase; ++kPack) {
-                auto valuesLower = tb.extract_element(i16_ty, operandAMeta[0][{b, m, k}], tb.i32_val(0));
-                auto valuesUpper = tb.extract_element(i16_ty, operandAMeta[0][{b, m, k + 1}], tb.i32_val(0));
-                auto upper = tb.shl(tb.zext(i32_ty, valuesUpper), tb.i32_val(16));
-                Value packed =
+              auto valuesLower = tb.extract_element(
+                  i16_ty, operandAMeta[0][{b, m, k}], tb.i32_val(0));
+              auto valuesUpper = tb.extract_element(
+                  i16_ty, operandAMeta[0][{b, m, k + 1}], tb.i32_val(0));
+              auto upper =
+                  tb.shl(tb.zext(i32_ty, valuesUpper), tb.i32_val(16));
+              Value packed =
                   tb.or_(i32_ty, upper, tb.zext(i32_ty, valuesLower));
-                packedMeta.push_back(packed);
-              }
+              packedMeta.push_back(packed);
             }
           }
 
@@ -963,8 +948,14 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
               // reg_idx contains aMeta
               // abid selects the relevant sparsity metadata for the A input.
               if (canPackOnKDim) {
-                auto packedMetadataInput = packedMeta[aMetaIdx / 4];
-                Value abid = tb.i32_val(aMetaIdx % 4);
+
+                // 16-bit values are packed differently than 8-bit values
+                auto packFactor = 4;
+                if (aTensorTy.getElementType().getIntOrFloatBitWidth() == 8)
+                  packFactor = 2;
+
+                auto packedMetadataInput = packedMeta[aMetaIdx / packFactor];
+                Value abid = tb.i32_val(aMetaIdx % packFactor);
                 acc = generateSparseMFMAOp(
                     intrinsicName, operandA[kPack][{b, m, k}],
                     operandB[kPack][{b, n, k}], acc, packedMetadataInput, abid);
@@ -972,7 +963,8 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                 aMetaIdx++;
               } else {
                 auto values = operandAMeta[0][{b, m, k}];
-                auto metadata = tb.extract_element(i16_ty, values, tb.i32_val(0));
+                auto metadata =
+                    tb.extract_element(i16_ty, values, tb.i32_val(0));
                 auto zextMetadata = tb.zext(i32_ty, metadata);
 
                 Value abid = tb.i32_val(kPack % 2);
