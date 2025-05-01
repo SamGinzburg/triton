@@ -1,19 +1,11 @@
-# (c) Meta Platforms, Inc. and affiliates. Confidential and proprietary.
-
+import triton.language as tl
 import random
-
-random.seed(42)
-
 import numpy as np
 import torch
+import triton
 
 torch.manual_seed(42)
-
-import triton
-import triton.language as tl
-"""
-Triton autotuning for function matmul_kernel_sparse finished after 98.81s; best config selected: BLOCK_SIZE_M: 128, BLOCK_SIZE_N: 128, BLOCK_SIZE_K: 64, GROUP_SIZE_M: 2, num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: None;
-"""
+random.seed(42)
 
 
 def get_autotune_config():
@@ -36,26 +28,9 @@ def get_autotune_config():
                                     num_stages=num_stages,
                                     num_warps=num_warps,
                                 ), )
-    # configs = [
-    #     triton.Config(
-    #         {
-    #             "BLOCK_SIZE_M": 16,
-    #             "BLOCK_SIZE_N": 32,
-    #             "BLOCK_SIZE_K": 128,
-    #             "GROUP_SIZE_M": 1,
-    #             "matrix_instr_nonkdim": 16,
-    #         },
-    #         num_stages=1,
-    #         num_warps=2,
-    #     ),
-    # ]
     return configs
 
 
-# @triton.autotune(
-#     configs=get_autotune_config(),
-#     key=["M", "N", "K"],
-# )
 @triton.heuristics(values={
     "EVEN_K": lambda args: args["K"] % args["BLOCK_SIZE_K"] == 0,
 })
@@ -156,6 +131,8 @@ def matmul_kernel_sparse(
 
         # We accumulate along the K dimension.
         accumulator += tl.dot_sparse(a, b, aMeta)
+        # alternatively,
+        # accumulator = tl.dot_sparse(a, b, aMeta, accumulator)
 
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K_A * stride_ak
@@ -295,9 +272,7 @@ def matmul(aSparse, aMeta, b, config):
 
 
 def test_sparse_matrix(dtype):
-    print("Testing dtype: ", str(dtype))
-    torch.manual_seed(42)
-    test_dim = 512 + 16
+    test_dim = 512
 
     a = make_sparse(torch.randn((test_dim, test_dim), device="cuda", dtype=torch.float16))
     print("Running sparse compression in Python... this can be quite slow, be patient!")
@@ -320,9 +295,8 @@ def test_sparse_matrix(dtype):
         torch_output = torch.matmul(a, b)
 
     for config in get_autotune_config():
-        print("Config: ", config)
+        print("Testing Config: ", config)
         triton_output = matmul(aSparse, aMeta, b, config)
-        print(f"config = {config}")
 
         #triton_output = triton_output.to(torch.float32)
         #torch_output = torch_output.to(torch.float32)
@@ -357,4 +331,5 @@ def test_sparse_matrix(dtype):
 dtypes = [torch.float16, torch.bfloat16, torch.float8_e4m3fnuz]
 
 for dtype in dtypes:
+    print(f"Running dot_sparse with dtype={dtype}")
     test_sparse_matrix(dtype)

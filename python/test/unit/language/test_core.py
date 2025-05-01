@@ -3494,6 +3494,109 @@ def convert_fp8_to_fp32(x, device, dtype_str):
     assert "Unsupported float8 dtype"
 
 
+# ---------------
+# utility functions for testing dot sparse
+# ---------------
+
+
+def make_sparse(A):
+    assert len(A.shape) == 2
+    assert A.shape[-1] % 4 == 0
+    assert A.is_contiguous()
+    constant = 0
+    for i in range(A.shape[0]):
+        indices_to_zero = []
+        for j in range(0, A.shape[1], 4):
+            # Randomly zero 2 out of 4 consecutive elements
+            indices_to_zero.extend(random.sample([j, j + 1, j + 2, j + 3], 2))
+        constant += 1
+        A[i, indices_to_zero] = 0
+    return A
+
+
+def make_sparse_3d(A):
+    assert len(A.shape) == 3
+    assert A.shape[-1] % 4 == 0
+    # assert A.is_contiguous()
+    constant = 0
+    for b in range(A.shape[0]):
+        for i in range(A.shape[1]):
+            indices_to_zero = []
+            for j in range(0, A.shape[2], 4):
+                # Randomly zero 2 out of 4 consecutive elements
+                indices_to_zero.extend(random.sample([j, j + 1, j + 2, j + 3], 2))
+            constant += 1
+            A[b, i, indices_to_zero] = 0
+    return A
+
+
+def compress(A):
+    # assert len(A.shape) == 2
+    assert A.shape[-1] % 4 == 0
+    # assert A.is_contiguous()
+    flat = A.flatten()
+    if hasattr(flat, "cpu"):
+        flat = flat.cpu().detach().numpy()
+
+    nonzero_indices = []
+    meta_nibbles = []
+
+    for outerIdx in range(0, len(flat), 4):
+        nibble = 0
+        nonzeroCount = 0
+        for innerIdx in range(4):
+            val = flat[outerIdx + innerIdx]
+            if val != 0:
+                nonzero_indices.append(outerIdx + innerIdx)
+                nibble |= innerIdx << (2 * nonzeroCount)
+                nonzeroCount += 1
+                if nonzeroCount > 2:
+                    raise Exception("too many nonzeros!")
+
+        if nonzeroCount == 0:
+            nibble |= 0b0100
+            nonzero_indices.extend([outerIdx + 0, outerIdx + 1])
+
+        if nonzeroCount == 1:
+            last_nonzero = nonzero_indices[-1]
+            if last_nonzero == outerIdx + 3:
+                assert nibble == 0b0011
+                nibble = 0b1100
+                nonzero_indices[-1] = outerIdx + 0
+                nonzero_indices.append(outerIdx + 3)
+            else:
+                nibble |= 0b1100
+                nonzero_indices.append(outerIdx + 3)
+
+        meta_nibbles.append(nibble)
+
+    assert len(meta_nibbles) == len(flat) // 4
+    assert len(nonzero_indices) == len(flat) // 2
+
+    metas = []
+    for outerIdx in range(0, len(meta_nibbles), 4):
+        meta = 0
+        meta |= meta_nibbles[outerIdx + 0] << 0
+        meta |= meta_nibbles[outerIdx + 1] << 4
+        meta |= meta_nibbles[outerIdx + 2] << 8
+        meta |= meta_nibbles[outerIdx + 3] << 12
+        metas.append(meta)
+
+    if len(A.shape) == 2:
+        aSparse = torch.tensor((A.flatten()[nonzero_indices]).reshape(A.shape[0], A.shape[1] // 2))
+        aMeta = torch.tensor(np.array(metas, dtype=np.uint16).astype(np.int16)).reshape(A.shape[0], A.shape[1] // 16)
+    elif len(A.shape) == 3:
+        aSparse = torch.tensor((A.flatten()[nonzero_indices]).reshape(A.shape[0], A.shape[1], A.shape[2] // 2))
+        aMeta = torch.tensor(np.array(metas,
+                                      dtype=np.uint16).astype(np.int16)).reshape(A.shape[0], A.shape[1],
+                                                                                 A.shape[2] // 16)
+    else:
+        bad_shape = len(A.shape)
+        assert f"Unsupported A input shape in compress(...): {bad_shape}"
+
+    return aSparse.cuda(), aMeta.cuda()
+
+
 # M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack, mma_nonk_size
 def get_test_dot_base_cases():
     return [(*shape, 4, False, False, epilogue, input_precision, in_dtype, out_dtype, 1, None)
@@ -4119,21 +4222,8 @@ def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dt
         if (M < 16 or N < 16 or K < 16):
             pytest.skip("small sparse dot is not supported")
         if is_cuda():
-            capability = torch.cuda.get_device_capability()
-
-            if capability[0] < 7:
-                pytest.skip("Only test tl.dot() on devices with sm >= 70")
-            if capability[0] < 8:
-                if capability[1] == 0 and in_dtype == 'int8':
-                    pytest.skip("Only test int8 on devices with sm >= 75")
-            if capability[0] == 7:
-                if (M, N, K, num_warps) in [(128, 256, 32, 8), (64, 128, 128, 4), (64, 128, 128, 2)]:
-                    pytest.skip("shared memory out of resource")
-                if out_dtype == 'float16':
-                    # TODO: support out_dtype=float16 for tl.dot on V100
-                    pytest.skip("Only test out_dtype=float16 on devices with sm >=80")
-            if capability[0] < 9 and in_dtype == 'float8e4nv':
-                pytest.skip("float8e4nv not supported on sm <= 80")
+            # TODO: enable support for dot_sparse on NVIDIA + enable tests
+            pytest.skip("dot_sparse is not supported on NVIDIA yet")
 
         if is_hip():
             # TODO: figure out why there is a datatype conversion issue here
@@ -4195,74 +4285,6 @@ def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dt
             z = tl.dot(z.to(w.dtype), w, out_dtype=out_dtype)
         tl.store(Zs, z)
 
-    def make_sparse(A):
-        assert len(A.shape) == 2
-        assert A.shape[-1] % 4 == 0
-        assert A.is_contiguous()
-        constant = 0
-        for i in range(A.shape[0]):
-            indices_to_zero = []
-            for j in range(0, A.shape[1], 4):
-                # Randomly zero 2 out of 4 consecutive elements
-                indices_to_zero.extend(random.sample([j, j + 1, j + 2, j + 3], 2))
-            constant += 1
-            A[i, indices_to_zero] = 0
-        return A
-
-    def compress(A):
-        assert len(A.shape) == 2
-        assert A.shape[-1] % 4 == 0
-        assert A.is_contiguous()
-        flat = A.flatten().cpu().detach().numpy()
-        nonzero_indices = []
-        meta_nibbles = []
-
-        for outerIdx in range(0, len(flat), 4):
-            nibble = 0
-            nonzeroCount = 0
-            for innerIdx in range(4):
-                val = flat[outerIdx + innerIdx]
-                if val != 0:
-                    nonzero_indices.append(outerIdx + innerIdx)
-                    nibble |= innerIdx << (2 * nonzeroCount)
-                    nonzeroCount += 1
-                    if nonzeroCount > 2:
-                        raise Exception("too many nonzeros!")
-
-            if nonzeroCount == 0:
-                nibble |= 0b0100
-                nonzero_indices.extend([outerIdx + 0, outerIdx + 1])
-
-            if nonzeroCount == 1:
-                last_nonzero = nonzero_indices[-1]
-                if last_nonzero == outerIdx + 3:
-                    assert nibble == 0b0011
-                    nibble = 0b1100
-                    nonzero_indices[-1] = outerIdx + 0
-                    nonzero_indices.append(outerIdx + 3)
-                else:
-                    nibble |= 0b1100
-                    nonzero_indices.append(outerIdx + 3)
-
-            meta_nibbles.append(nibble)
-
-        assert len(meta_nibbles) == len(flat) // 4
-        assert len(nonzero_indices) == len(flat) // 2
-
-        metas = []
-        for outerIdx in range(0, len(meta_nibbles), 4):
-            meta = 0
-            meta |= meta_nibbles[outerIdx + 0] << 0
-            meta |= meta_nibbles[outerIdx + 1] << 4
-            meta |= meta_nibbles[outerIdx + 2] << 8
-            meta |= meta_nibbles[outerIdx + 3] << 12
-            metas.append(meta)
-
-        aSparse = (A.flatten()[nonzero_indices]).reshape(A.shape[0], A.shape[1] // 2)
-        aMeta = torch.tensor(np.array(metas, dtype=np.uint16).astype(np.int16)).reshape(A.shape[0], A.shape[1] // 16)
-        return aSparse.cuda(), aMeta.cuda()
-
-    # TODO: make this use numpy instead of torch?
     # Right now, this is a GPU-only test (AMD, NVIDIA)
     # We are going to:
     # 1) Make x sparse
@@ -4407,6 +4429,166 @@ def test_dot_sparse(M, N, K, num_warps, col_a, col_b, epilogue, in_dtype, out_dt
     else:
         # added atol, to loose precision for float16xfloat16->float32 case
         np.testing.assert_allclose(z_ref, to_numpy(z_tri), rtol=0.01, atol=1e-3)
+
+
+@pytest.mark.interpreter
+@pytest.mark.parametrize("B, num_warps, M, N, K, BLOCK_M, BLOCK_N, in_dtype_str, out_dtype_str",
+                         [(B, num_warps, M, N, K, BLOCK_M, BLOCK_N, in_dtype_str, out_dtype_str)
+                          for B in [1, 2, 4, 8]
+                          for num_warps in [1, 2, 4, 8, 16]
+                          for BLOCK_M, BLOCK_N in [(32, 32)]
+                          for M, N, K in [(64, 64, 64), (32, 32, 32)]
+                          for in_dtype_str, out_dtype_str in [('float16', 'float16')]] +
+                         # Large block sizes
+                         [(4, 4, 128, 128, 64, 64, 64, 'float16', 'float16')] +
+                         # Small block sizes
+                         [(B, num_warps, M, N, K, BLOCK_M, BLOCK_N, in_dtype_str, out_dtype_str)
+                          for B in [1, 2, 8]
+                          for num_warps in [1, 2, 4]
+                          for BLOCK_M, BLOCK_N in [(32, 32)]
+                          for M, N, K in [(32, 32, 32)]
+                          for in_dtype_str, out_dtype_str in [('float16', 'float16')]])
+def test_dot_sparse_3d(B, num_warps, M, N, K, BLOCK_M, BLOCK_N, in_dtype_str, out_dtype_str, device):
+    if is_hip():
+        # hip does not support tf32 precision, so use ieee for all tests
+        input_precision = "ieee"
+        arch = triton.runtime.driver.active.get_current_target().arch
+        if "gfx11" in arch or "gfx12" in arch:
+            if in_dtype_str == "float32":
+                pytest.skip(f"{in_dtype_str} is not supported in WMMA dot, FMA does not support dot3d")
+            if out_dtype_str == "float16":
+                pytest.skip(f"{out_dtype_str} has low precision in WMMA dot")
+    else:
+        input_precision = "tf32" if is_cuda() and in_dtype_str == 'float32' else "ieee"
+        if not is_interpreter() and (BLOCK_M < 16 or BLOCK_N < 16):
+            pytest.skip("small dots are supported only on HIP at the moment")
+
+    if B == 8 and M == 64 and in_dtype_str == "float32" and out_dtype_str == "float32":
+        if not is_interpreter() and triton.runtime.driver.active.utils.get_device_properties(
+                triton.runtime.driver.active.get_current_device())["max_shared_mem"] < 131072:
+            pytest.skip(
+                "Skipping tests with B = 8, M = 64, in_type = float32, out_type = float32 due to insufficient shared memory (less than 128 KB per SM) on this GPU."
+            )
+
+    @triton.jit
+    def kernel(
+        q_ptr,
+        k_ptr,
+        o_ptr,
+        qMeta_ptr,
+        stride_qb,
+        stride_qm,
+        stride_qk,
+        stride_kb,
+        stride_kk,
+        stride_kn,
+        stride_ob,
+        stride_om,
+        stride_on,
+        # qMeta strides
+        stride_qbMeta,
+        stride_qmMeta,
+        stride_qkMeta,
+        BLOCK_B: tl.constexpr,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        INPUT_PRECISION: tl.constexpr,
+        out_dtype: tl.constexpr = tl.float32,
+    ):
+        startm = tl.program_id(0) * BLOCK_M
+        startn = tl.program_id(1) * BLOCK_N
+        offs_b = tl.arange(0, BLOCK_B)
+        offs_m = startm + tl.arange(0, BLOCK_M)
+        offs_n = startn + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+        offs_kQ = tl.arange(0, BLOCK_K // 2)
+        offs_kMeta = tl.arange(0, BLOCK_K // 16)
+        q_ptrs = q_ptr + offs_b[:, None, None] * stride_qb + offs_m[None, :, None] * stride_qm + offs_kQ[
+            None, None, :] * stride_qk
+
+        # Metadata input
+        q_Meta_ptrs = qMeta_ptr + offs_b[:, None, None] * stride_qbMeta + offs_m[
+            None, :, None] * stride_qmMeta + offs_kMeta[None, None, :] * stride_qkMeta
+
+        k_ptrs = k_ptr + offs_b[:, None, None] * stride_kb + offs_k[None, :, None] * stride_kk + offs_n[
+            None, None, :] * stride_kn
+        q = tl.load(q_ptrs)
+        k = tl.load(k_ptrs)
+        qMeta = tl.load(q_Meta_ptrs)
+        qk = tl.dot_sparse(q, k, qMeta).to(out_dtype)
+        o_ptrs = o_ptr + offs_b[:, None, None] * stride_ob + offs_m[None, :, None] * stride_om + offs_n[
+            None, None, :] * stride_on
+        tl.store(o_ptrs, qk)
+
+    if out_dtype_str == 'int8':
+        out_dtype = tl.int8
+    elif out_dtype_str == 'float16':
+        out_dtype = tl.float16
+    else:
+        out_dtype = tl.float32
+
+    rs = RandomState(17)
+    x = numpy_random((B, M, K), dtype_str=in_dtype_str, rs=rs)
+    y = numpy_random((B, K, N), dtype_str=in_dtype_str, rs=rs)
+    if in_dtype_str == 'int8':
+        out = numpy_random((B, M, N), dtype_str='int32', rs=rs)
+    else:
+        if is_hip() and (BLOCK_M < 16 or BLOCK_N < 16) and out_dtype_str == 'float16':
+            # float16 accumulator in FMA dot loose precision too fast
+            x *= 0.1
+            y *= 0.1
+        out = numpy_random((B, M, N), dtype_str=out_dtype_str, rs=rs)
+
+    x = make_sparse_3d(x)
+    y = make_sparse_3d(y)
+
+    # aSparse is only used on the GPU
+    xSparse, xMeta = compress(x)
+
+    x_tri = xSparse  # to_triton(xSparse, device=device)
+    xMeta_tri = xMeta  # to_triton(xMeta, device=device)
+    y_tri = to_triton(y, device=device)
+    out_tri = to_triton(out, device=device)
+
+    BLOCK_B = B
+    BLOCK_K = K
+
+    grid = (
+        triton.cdiv(M, BLOCK_M),
+        triton.cdiv(N, BLOCK_N),
+    )
+    kernel[grid](
+        x_tri,
+        y_tri,
+        out_tri,
+        xMeta_tri,
+        x_tri.stride(0),
+        x_tri.stride(1),
+        x_tri.stride(2),
+        y_tri.stride(0),
+        y_tri.stride(1),
+        y_tri.stride(2),
+        out_tri.stride(0),
+        out_tri.stride(1),
+        out_tri.stride(2),
+        xMeta_tri.stride(0),
+        xMeta_tri.stride(1),
+        xMeta_tri.stride(2),
+        BLOCK_B=BLOCK_B,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        INPUT_PRECISION=input_precision,
+        out_dtype=out_dtype,
+        num_warps=num_warps,
+    )
+
+    if in_dtype_str == 'int8':
+        out_ref = np.matmul(x.astype(np.float32), y.astype(np.float32)).astype(np.int32)
+    else:
+        out_ref = np.matmul(x, y)
+    np.testing.assert_allclose(out_ref, to_numpy(out_tri), rtol=0.01, atol=1e-2)
 
 
 @pytest.mark.interpreter

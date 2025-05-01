@@ -1610,7 +1610,8 @@ def dot_sparse(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
 
     lhs_rank = len(lhs.shape)
     rhs_rank = len(rhs.shape)
-    assert lhs_rank == rhs_rank == 2, f"Both inputs must be 2D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
+    assert (lhs_rank == rhs_rank == 2) or (lhs_rank == rhs_rank ==
+                                           3), f"Both inputs must be 2D or 3D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
     assert lhs.shape[-1].value * 2 == rhs.shape[
         -2].value, f"First input shape {lhs.shape} and second input shape {rhs.shape} are not compatible for matmul (lhs: {lhs.shape} vs rhs: {rhs.shape})"
     assert builder.codegen_fns.get(
@@ -1625,9 +1626,11 @@ def dot_sparse(lhs: tl.tensor, rhs: tl.tensor, lhs_meta: tl.tensor, acc: tl.tens
 
     M = lhs.type.shape[-2]
     N = rhs.type.shape[-1]
-    ret_ty = tl.block_type(ret_scalar_ty, [M, N])
+    B = lhs.type.shape[0] if lhs_rank == 3 else None
+    ret_ty = tl.block_type(ret_scalar_ty, [B, M, N] if B else [M, N])
+
     if acc is None:
-        acc_handle = builder.create_splat(_0, [M, N])
+        acc_handle = builder.create_splat(_0, [B, M, N] if B else [M, N])
     else:
         acc_handle = acc.handle
         assert acc.type == ret_ty

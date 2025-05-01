@@ -26,7 +26,6 @@
 #include "Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "llvm/ADT/TypeSwitch.h"
-#include <cstdio>
 
 using namespace mlir;
 using namespace mlir::triton;
