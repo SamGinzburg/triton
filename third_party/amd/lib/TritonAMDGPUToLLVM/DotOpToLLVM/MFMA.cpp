@@ -930,8 +930,7 @@ struct SparseDotOpMFMAConversionHelper : DotOpMFMAConversionHelper {
                   i16_ty, operandAMeta[0][{b, m, k}], tb.i32_val(0));
               auto valuesUpper = tb.extract_element(
                   i16_ty, operandAMeta[0][{b, m, k + 1}], tb.i32_val(0));
-              auto upper =
-                  tb.shl(tb.zext(i32_ty, valuesUpper), tb.i32_val(16));
+              auto upper = tb.shl(tb.zext(i32_ty, valuesUpper), tb.i32_val(16));
               Value packed =
                   tb.or_(i32_ty, upper, tb.zext(i32_ty, valuesLower));
               packedMeta.push_back(packed);
