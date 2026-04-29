@@ -149,3 +149,77 @@ module attributes {"ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 64 : i32}
     tt.return
   }
 }
+
+// -----
+// On gfx11 WMMA v1 transposed BF16, BypassEpilogueSMEM should pick the new
+// linear layout that places 8 consecutive [B]F16 elements per thread along
+// the N axis, enabling 128-bit global stores.
+// CHECK{LITERAL}: #linear = #ttg.linear<{register = [[0, 1], [0, 2], [0, 4], [0, 64], [32, 0], [64, 0]], lane = [[1, 0], [2, 0], [4, 0], [8, 0], [0, 8]], warp = [[0, 16], [0, 32], [16, 0]], block = []}>
+// CHECK-LABEL: wmma_v1_bf16_128x128
+// CHECK-NOT: ttg.convert_layout %{{.*}} : tensor<128x128xf32, #mma> -> tensor<128x128xf32, #blocked>
+// CHECK-DAG: %[[PTR:.+]] = ttg.convert_layout %{{.*}} : tensor<128x128x!tt.ptr<bf16>, #mma> -> tensor<128x128x!tt.ptr<bf16>, #linear>
+// CHECK-DAG: %[[VAL:.+]] = ttg.convert_layout %{{.*}} : tensor<128x128xbf16, #mma> -> tensor<128x128xbf16, #linear>
+// CHECK: tt.store %[[PTR]], %[[VAL]] : tensor<128x128x!tt.ptr<bf16>, #linear>
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [16, 2], warpsPerCTA = [2, 4], order = [1, 0]}>
+#mma = #ttg.amd_wmma<{version = 1, isTranspose = true, ctaLayout = {warp = [[0, 1], [0, 2], [1, 0]]}}>
+module attributes {"ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @wmma_v1_bf16_128x128(%arg0: !tt.ptr<bf16>) {
+    %cst = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #mma>
+    %cst_0 = arith.constant dense<1.230000e+02> : tensor<128x128xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>
+    %cst_1 = arith.constant dense<1.230000e+02> : tensor<128x128xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>
+    %0 = tt.dot %cst_0, %cst_1, %cst : tensor<128x128xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> * tensor<128x128xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> -> tensor<128x128xf32, #mma>
+    %1 = ttg.convert_layout %0 : tensor<128x128xf32, #mma> -> tensor<128x128xf32, #blocked>
+    %2 = arith.truncf %1 : tensor<128x128xf32, #blocked> to tensor<128x128xbf16, #blocked>
+    %3 = tt.splat %arg0 : !tt.ptr<bf16> -> tensor<128x128x!tt.ptr<bf16>, #blocked>
+    tt.store %3, %2 : tensor<128x128x!tt.ptr<bf16>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+// WMMA v1 with isTranspose=false is not supported by the wide-store helper:
+// the bypass still rewrites the store to the WMMA accumulator layout, but no
+// #linear is introduced.
+// CHECK-LABEL: wmma_v1_not_transposed
+// CHECK-NOT: #linear
+// CHECK-NOT: ttg.convert_layout %{{.*}} -> tensor<128x128xf32, #blocked>
+// CHECK: tt.store %{{.*}} : tensor<128x128x!tt.ptr<bf16>, #mma>
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [16, 2], warpsPerCTA = [2, 4], order = [1, 0]}>
+#mma = #ttg.amd_wmma<{version = 1, isTranspose = false, ctaLayout = {warp = [[0, 1], [0, 2], [1, 0]]}}>
+module attributes {"ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @wmma_v1_not_transposed(%arg0: !tt.ptr<bf16>) {
+    %cst = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #mma>
+    %cst_0 = arith.constant dense<1.230000e+02> : tensor<128x128xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>
+    %cst_1 = arith.constant dense<1.230000e+02> : tensor<128x128xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>
+    %0 = tt.dot %cst_0, %cst_1, %cst : tensor<128x128xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> * tensor<128x128xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> -> tensor<128x128xf32, #mma>
+    %1 = ttg.convert_layout %0 : tensor<128x128xf32, #mma> -> tensor<128x128xf32, #blocked>
+    %2 = arith.truncf %1 : tensor<128x128xf32, #blocked> to tensor<128x128xbf16, #blocked>
+    %3 = tt.splat %arg0 : !tt.ptr<bf16> -> tensor<128x128x!tt.ptr<bf16>, #blocked>
+    tt.store %3, %2 : tensor<128x128x!tt.ptr<bf16>, #blocked>
+    tt.return
+  }
+}
+
+// -----
+// WMMA v2 is not yet handled by the helper (TODO in
+// chooseMfmaLikeStoreLayout). The bypass still fires, but no #linear is
+// introduced.
+// CHECK-LABEL: wmma_v2_should_skip
+// CHECK-NOT: #linear
+// CHECK-NOT: ttg.convert_layout %{{.*}} -> tensor<128x128xf32, #blocked>
+// CHECK: tt.store %{{.*}} : tensor<128x128x!tt.ptr<bf16>, #mma>
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [16, 2], warpsPerCTA = [2, 4], order = [1, 0]}>
+#mma = #ttg.amd_wmma<{version = 2, isTranspose = true, ctaLayout = {warp = [[0, 1], [0, 2], [1, 0]]}}>
+module attributes {"ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @wmma_v2_should_skip(%arg0: !tt.ptr<bf16>) {
+    %cst = arith.constant dense<0.000000e+00> : tensor<128x128xf32, #mma>
+    %cst_0 = arith.constant dense<1.230000e+02> : tensor<128x128xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>
+    %cst_1 = arith.constant dense<1.230000e+02> : tensor<128x128xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>
+    %0 = tt.dot %cst_0, %cst_1, %cst : tensor<128x128xf16, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> * tensor<128x128xf16, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> -> tensor<128x128xf32, #mma>
+    %1 = ttg.convert_layout %0 : tensor<128x128xf32, #mma> -> tensor<128x128xf32, #blocked>
+    %2 = arith.truncf %1 : tensor<128x128xf32, #blocked> to tensor<128x128xbf16, #blocked>
+    %3 = tt.splat %arg0 : !tt.ptr<bf16> -> tensor<128x128x!tt.ptr<bf16>, #blocked>
+    tt.store %3, %2 : tensor<128x128x!tt.ptr<bf16>, #blocked>
+    tt.return
+  }
+}

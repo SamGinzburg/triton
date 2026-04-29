@@ -32,15 +32,6 @@ def is_async_copy_enabled(arch):
     return (arch in ["gfx950", "gfx1250"]) if knobs.amd.use_async_copy is None else knobs.amd.use_async_copy
 
 
-def is_optimize_epilogue_enabled(arch):
-    if knobs.amd.use_optimize_epilogue is not None:
-        return knobs.amd.use_optimize_epilogue
-    # Skip pass on gfx1151 by default, as it harms performance.
-    if arch == "gfx1151":
-        return False
-    return True
-
-
 def is_fpsan_supported(arch):
     return arch in ["gfx942", "gfx950", "gfx1250"]
 
@@ -258,8 +249,7 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_optimize_thread_locality(pm)
         amd.passes.ttgpuir.add_accelerate_matmul(pm, options.arch, options.matrix_instr_nonkdim, options.kpack)
         passes.ttgpuir.add_remove_layout_conversions(pm)
-        if is_optimize_epilogue_enabled(options.arch):
-            amd.passes.ttgpuir.add_optimize_epilogue(pm)
+        amd.passes.ttgpuir.add_optimize_epilogue(pm)
         amd.passes.ttgpuir.add_optimize_dot_operands(pm, options.arch)
         amd.passes.ttgpuir.add_hoist_layout_conversions(pm)
         amd.passes.ttgpuir.add_sink_layout_conversions(pm)
