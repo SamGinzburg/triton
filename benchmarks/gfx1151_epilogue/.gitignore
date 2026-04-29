@@ -1,0 +1,11 @@
+# Runtime artifacts that don't belong in the repo.
+**/run.log
+**/*.hsaco
+**/*.so
+**/*.source
+# The IR dump runs use TRITON_DUMP_DIR which mirrors TRITON_CACHE_DIR;
+# only keep one of them tracked.
+ir_dumps/*/dump/
+# Triton cache dirs auto-name kernels by content hash. Keep the matmul
+# kernel IRs we explicitly care about, drop everything else.
+ir_dumps/*/cache/KLUD*/

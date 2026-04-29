@@ -1,0 +1,4 @@
+label=force_on knob=1
+git_rev=82ff564c609c60c9a196c180572ee48f67771166
+triton 3.7.0
+target GPUTarget(backend='hip', arch='gfx1151', warp_size=32)

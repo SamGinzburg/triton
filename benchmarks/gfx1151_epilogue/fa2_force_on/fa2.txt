@@ -1,0 +1,44 @@
+# device: Radeon 8060S Graphics
+# target: GPUTarget(backend='hip', arch='gfx1151', warp_size=32)
+# triton: 3.7.0
+# TRITON_HIP_USE_OPTIMIZE_EPILOGUE=1
+# TRITON_CACHE_DIR=/tmp/triton-cache-fa2-force_on
+
+# correctness (fp16 vs fp32 ref, small case)
+# causal=False: max_abs=0.0009766 max_rel=0.1533 ok=False
+# causal=True: max_abs=0.001953 max_rel=0.05583 ok=False
+
+head_dim  N_CTX causal mode         ms    TFLOP/s
+------------------------------------------------------------
+      64   1024  False  fwd     1.1139      30.85
+      64   1024  False  bwd    17.8858       4.80
+      64   1024   True  fwd     0.8221      20.90
+      64   1024   True  bwd     9.2318       4.65
+      64   2048  False  fwd     4.2871      32.06
+      64   2048  False  bwd    71.3688       4.81
+      64   2048   True  fwd     2.5799      26.64
+      64   2048   True  bwd    33.3025       5.16
+      64   4096  False  fwd    15.6742      35.07
+      64   4096  False  bwd   282.8259       4.86
+      64   4096   True  fwd     9.1944      29.90
+      64   4096   True  bwd   127.5564       5.39
+      64   8192  False  fwd    62.6296      35.11
+      64   8192  False  bwd  1131.6486       4.86
+      64   8192   True  fwd    32.6932      33.63
+      64   8192   True  bwd   499.7845       5.50
+     128   1024  False  fwd     2.3975      28.66
+     128   1024  False  bwd    44.3223       3.88
+     128   1024   True  fwd     1.3390      25.66
+     128   1024   True  bwd    27.7313       3.10
+     128   2048  False  fwd     9.0234      30.46
+     128   2048  False  bwd   165.9853       4.14
+     128   2048   True  fwd     4.6731      29.41
+     128   2048   True  bwd    94.3245       3.64
+     128   4096  False  fwd    34.5968      31.78
+     128   4096  False  bwd   643.6361       4.27
+     128   4096   True  fwd    17.6385      31.17
+     128   4096   True  bwd   343.6761       4.00
+     128   8192  False  fwd   140.3299      31.34
+     128   8192  False  bwd  2546.9519       4.32
+     128   8192   True  fwd    68.0897      32.30
+     128   8192   True  bwd  1309.5782       4.20

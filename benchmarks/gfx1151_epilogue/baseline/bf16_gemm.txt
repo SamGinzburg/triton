@@ -1,0 +1,57 @@
+# device: Radeon 8060S Graphics
+# target: GPUTarget(backend='hip', arch='gfx1151', warp_size=32)
+# torch: 2.9.1+rocm7.2.0.git7e1940d4
+# triton: 3.7.0
+# TRITON_HIP_USE_OPTIMIZE_EPILOGUE=unset
+# TRITON_CACHE_DIR=/tmp/triton-cache-baseline
+
+shape                    layout provider           ms         lo         hi    TFLOP/s
+------------------------------------------------------------------------------------------
+small_K_square_64        NN     triton         0.3912     0.3860     0.3955       5.49
+small_K_square_64        NN     rocblas        0.2891     0.2855     0.2928       7.43
+small_K_square_64        TN     triton         0.3901     0.3860     0.3963       5.50
+small_K_square_64        TN     rocblas        0.2786     0.2760     0.2830       7.71
+small_K_square_64        NT     triton         0.4083     0.4035     0.4137       5.26
+small_K_square_64        NT     rocblas        0.4081     0.4049     0.4111       5.26
+small_K_square_128       NN     triton         0.4232     0.4169     0.4287      10.15
+small_K_square_128       NN     rocblas        0.2591     0.2555     0.2614      16.57
+small_K_square_128       TN     triton         0.4192     0.4136     0.4238      10.24
+small_K_square_128       TN     rocblas        0.3096     0.3081     0.3128      13.87
+small_K_square_128       NT     triton         0.4532     0.4455     0.4581       9.48
+small_K_square_128       NT     rocblas        0.3395     0.3367     0.3411      12.65
+medium_K_square_256      NN     triton         0.5245     0.5198     0.5327      16.38
+medium_K_square_256      NN     rocblas        0.3203     0.3172     0.3238      26.82
+medium_K_square_256      TN     triton         0.5211     0.5160     0.5280      16.48
+medium_K_square_256      TN     rocblas        0.3837     0.3805     0.3863      22.39
+medium_K_square_256      NT     triton         0.5977     0.5905     0.6033      14.37
+medium_K_square_256      NT     rocblas        0.4964     0.4904     0.5015      17.30
+large_K_square_1024      NN     triton         1.2806     1.2664     1.2923      26.83
+large_K_square_1024      NN     rocblas        1.0846     1.0731     1.0908      31.68
+large_K_square_1024      TN     triton         1.1646     1.1549     1.1726      29.50
+large_K_square_1024      TN     rocblas        1.0939     1.0848     1.1098      31.41
+large_K_square_1024      NT     triton         2.4320     2.3705     2.4694      14.13
+large_K_square_1024      NT     rocblas        2.1314     2.0871     2.1572      16.12
+large_square_8k_128      NN     triton         1.5828     1.5755     1.5881      10.85
+large_square_8k_128      NN     rocblas        0.9569     0.9511     0.9664      17.95
+large_square_8k_128      TN     triton         1.5808     1.5772     1.5850      10.87
+large_square_8k_128      TN     rocblas        1.2137     1.2106     1.2200      14.15
+large_square_8k_128      NT     triton         1.6768     1.6703     1.6833      10.25
+large_square_8k_128      NT     rocblas        1.3206     1.3118     1.3259      13.01
+tall_skinny_128          NN     triton         0.2247     0.2223     0.2274       9.56
+tall_skinny_128          NN     rocblas        0.1265     0.1246     0.1282      16.97
+tall_skinny_128          TN     triton         0.2214     0.2193     0.2250       9.70
+tall_skinny_128          TN     rocblas        0.1288     0.1276     0.1304      16.67
+tall_skinny_128          NT     triton         0.2351     0.2314     0.2402       9.13
+tall_skinny_128          NT     rocblas        0.1262     0.1244     0.1280      17.02
+wide_128                 NN     triton         0.2274     0.2253     0.2292       9.44
+wide_128                 NN     rocblas        0.2022     0.1997     0.2050      10.62
+wide_128                 TN     triton         0.2267     0.2242     0.2284       9.47
+wide_128                 TN     rocblas        0.1930     0.1915     0.1951      11.13
+wide_128                 NT     triton         0.2325     0.2305     0.2343       9.24
+wide_128                 NT     rocblas        0.2594     0.2560     0.2626       8.28
+tail_mask_127            NN     triton         0.3685     0.3664     0.3711      11.57
+tail_mask_127            NN     rocblas        0.2731     0.2696     0.2769      15.62
+tail_mask_127            TN     triton         0.4172     0.4145     0.4298      10.22
+tail_mask_127            TN     rocblas        0.2822     0.2782     0.2880      15.11
+tail_mask_127            NT     triton         0.3668     0.3645     0.3796      11.63
+tail_mask_127            NT     rocblas        0.2938     0.2913     0.2970      14.52
