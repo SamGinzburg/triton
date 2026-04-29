@@ -35,9 +35,7 @@ def is_async_copy_enabled(arch):
 def is_optimize_epilogue_enabled(arch):
     if knobs.amd.use_optimize_epilogue is not None:
         return knobs.amd.use_optimize_epilogue
-    # Temporary gfx11/Strix Halo policy: allow the normal xmma->blocked
-    # epilogue conversion to survive on gfx1151 so it can lower through
-    # shared memory when that is cheaper than direct WMMA-layout stores.
+    # Skip pass on gfx1151 by default, as it harms performance.
     if arch == "gfx1151":
         return False
     return True
