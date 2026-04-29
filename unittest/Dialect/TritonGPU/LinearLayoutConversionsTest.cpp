@@ -2135,6 +2135,37 @@ TEST_F(LinearLayoutConversionsTest, WMMA_v1_2x4Warps) {
                          {S("dim0"), S("dim1")}));
 }
 
+TEST_F(LinearLayoutConversionsTest, WMMA_v1_ChooseMfmaLikeStoreLayout) {
+  auto layout = wmma(/*warps=*/{2, 4}, /*version=*/1, /*transposed=*/true);
+  auto type = RankedTensorType::get({128, 128}, BFloat16Type::get(&ctx),
+                                    layout);
+
+  std::optional<LinearLayout> storeLayout = chooseMfmaLikeStoreLayout(type);
+  ASSERT_TRUE(storeLayout.has_value());
+
+  EXPECT_EQ(*storeLayout,
+            LinearLayout(
+                {{S("register"),
+                  {{0, 1}, {0, 2}, {0, 4}, {0, 64}, {32, 0}, {64, 0}}},
+                 {S("lane"), {{1, 0}, {2, 0}, {4, 0}, {8, 0}, {0, 8}}},
+                 {S("warp"), {{0, 16}, {0, 32}, {16, 0}}},
+                 {S("block"), {}}},
+                {S("dim0"), S("dim1")}));
+
+  auto kRegister = S("register");
+  EXPECT_THAT(storeLayout->getBasis(kRegister, 0),
+              ::testing::ElementsAre(0, 1));
+  EXPECT_THAT(storeLayout->getBasis(kRegister, 1),
+              ::testing::ElementsAre(0, 2));
+  EXPECT_THAT(storeLayout->getBasis(kRegister, 2),
+              ::testing::ElementsAre(0, 4));
+
+  auto linearEncoding = LinearEncodingAttr::get(&ctx, *storeLayout);
+  auto contigPerThread = linearEncoding.getContigPerThread();
+  ASSERT_EQ(contigPerThread.size(), 2u);
+  EXPECT_EQ(contigPerThread[1], 8u);
+}
+
 TEST_F(LinearLayoutConversionsTest, WMMA_v1_2x4x1Warps) {
   auto legacy = wmma(/*warps=*/{2, 4, 1}, /*version=*/1, /*transposed=*/false);
 

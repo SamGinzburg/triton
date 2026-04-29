@@ -1609,7 +1609,48 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
 
 std::optional<LinearLayout>
 chooseMfmaLikeStoreLayout(RankedTensorType valType) {
-  // TODO: WMMA Support on RDNA
+  if (auto wmmaLayout = dyn_cast<AMDWmmaEncodingAttr>(valType.getEncoding())) {
+    Type elemType = valType.getElementType();
+    auto valShape = valType.getShape();
+    auto mnkDim = wmmaLayout.getInstrShape();
+    if (!(valType.getRank() == 2 && (elemType.isF16() || elemType.isBF16()) &&
+          wmmaLayout.getVersion() == 1 && wmmaLayout.getIsTransposed() &&
+          mnkDim[0] == 16 && mnkDim[1] == 16 && mnkDim[2] == 16))
+      return {};
+
+    LinearLayout wmmaLL = wmmaLayout.toLinearLayout(valShape);
+    MLIRContext *ctx = wmmaLayout.getContext();
+    StringAttr kLane = S("lane");
+    if (wmmaLL.getInDimSize(kLane) != 32)
+      return {};
+
+    auto wmmaOutDims = llvm::to_vector(wmmaLL.getOutDimNames());
+    StringAttr dimM = wmmaOutDims[0];
+    StringAttr dimN = wmmaOutDims[1];
+    if (wmmaLL.getOutDimSizeLog2(dimN) < 4)
+      return {};
+
+    auto swapLL = LinearLayout::empty();
+    // The rows are kept as is with an identity linear layout.
+    swapLL *= LinearLayout::identity1D(valShape[0], dimM, dimM);
+
+    // In transposed WMMAv1, the low N bits are distributed as:
+    //   register: N1, N2, N3
+    //   lane:     N0
+    // Rotate the low four N bases right so the register dimension becomes
+    // N0, N1, N2. The lane-16 bit then selects N3, keeping the conversion
+    // warp-local and enabling 8 consecutive [B]F16 elements per thread.
+    std::vector<std::vector<int32_t>> dimNBases(wmmaLL.getOutDimSizeLog2(dimN));
+    std::generate(dimNBases.begin(), dimNBases.end(),
+                  [i = 0]() mutable { return std::vector<int32_t>{1 << i++}; });
+    std::rotate(dimNBases.begin(), dimNBases.begin() + 3,
+                dimNBases.begin() + 4);
+    swapLL *= LinearLayout({{dimN, dimNBases}}, {dimN});
+
+    return wmmaLL.compose(swapLL);
+  }
+
+  // TODO: Extend this helper to WMMA v2/v3 on RDNA4.
   if (!isa<AMDMfmaEncodingAttr>(valType.getEncoding()))
     return {};
   auto mfmaLayout = cast<AMDMfmaEncodingAttr>(valType.getEncoding());
