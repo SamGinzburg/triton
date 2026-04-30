@@ -2164,6 +2164,44 @@ TEST_F(LinearLayoutConversionsTest, WMMA_v1_ChooseMfmaLikeStoreLayout) {
   auto contigPerThread = linearEncoding.getContigPerThread();
   ASSERT_EQ(contigPerThread.size(), 2u);
   EXPECT_EQ(contigPerThread[1], 8u);
+
+  auto f16Type =
+      RankedTensorType::get({128, 128}, Float16Type::get(&ctx), layout);
+  std::optional<LinearLayout> f16StoreLayout =
+      chooseMfmaLikeStoreLayout(f16Type);
+  ASSERT_TRUE(f16StoreLayout.has_value());
+  EXPECT_EQ(*f16StoreLayout, *storeLayout);
+}
+
+TEST_F(LinearLayoutConversionsTest,
+       WMMA_v1_ChooseMfmaLikeStoreLayoutRejectsUnsupportedLayouts) {
+  Type bf16 = BFloat16Type::get(&ctx);
+  auto makeType = [&](ArrayRef<int64_t> shape, Type elementType,
+                      Attribute encoding) {
+    return RankedTensorType::get(shape, elementType, encoding);
+  };
+
+  EXPECT_FALSE(chooseMfmaLikeStoreLayout(makeType(
+      {128, 128}, bf16,
+      wmma(/*warps=*/{2, 4}, /*version=*/1, /*transposed=*/false))));
+  EXPECT_FALSE(chooseMfmaLikeStoreLayout(makeType(
+      {128, 128}, bf16,
+      wmma(/*warps=*/{2, 4}, /*version=*/2, /*transposed=*/true))));
+  EXPECT_FALSE(chooseMfmaLikeStoreLayout(makeType(
+      {128, 128}, Float32Type::get(&ctx),
+      wmma(/*warps=*/{2, 4}, /*version=*/1, /*transposed=*/true))));
+  EXPECT_FALSE(chooseMfmaLikeStoreLayout(makeType(
+      {128, 128}, IntegerType::get(&ctx, 8),
+      wmma(/*warps=*/{2, 4}, /*version=*/1, /*transposed=*/true))));
+  EXPECT_FALSE(chooseMfmaLikeStoreLayout(makeType(
+      {128, 128}, IntegerType::get(&ctx, 32),
+      wmma(/*warps=*/{2, 4}, /*version=*/1, /*transposed=*/true))));
+  EXPECT_FALSE(chooseMfmaLikeStoreLayout(makeType(
+      {128, 8}, bf16,
+      wmma(/*warps=*/{2, 4}, /*version=*/1, /*transposed=*/true))));
+  EXPECT_FALSE(chooseMfmaLikeStoreLayout(makeType(
+      {1, 128, 128}, bf16,
+      wmma(/*warps=*/{1, 2, 4}, /*version=*/1, /*transposed=*/true))));
 }
 
 TEST_F(LinearLayoutConversionsTest, WMMA_v1_2x4x1Warps) {

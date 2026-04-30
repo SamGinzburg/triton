@@ -1634,12 +1634,20 @@ chooseMfmaLikeStoreLayout(RankedTensorType valType) {
     // The rows are kept as is with an identity linear layout.
     swapLL *= LinearLayout::identity1D(valShape[0], dimM, dimM);
 
-    // In transposed WMMAv1, the low N bits are distributed as:
+    // AMDWmmaEncodingAttr::getTileLayout models transposed WMMAv1 16x16x16
+    // results with the low N bases split as:
     //   register: N1, N2, N3
     //   lane:     N0
-    // Rotate the low four N bases right so the register dimension becomes
-    // N0, N1, N2. The lane-16 bit then selects N3, keeping the conversion
-    // warp-local and enabling 8 consecutive [B]F16 elements per thread.
+    // A thread's registers therefore cover every other element along N; memory
+    // lowering cannot form a b128 store while the fastest N bit is owned by
+    // lane id.  Rotate only the low four N bases:
+    //   [N0, N1, N2, N3] -> [N3, N0, N1, N2]
+    // After composition, the register bases are N0/N1/N2 and lane bit 16 owns
+    // N3.  This keeps M, warp, and higher-tile bases unchanged, so the mapping
+    // remains a bijective warp-local reshuffle while each thread exposes eight
+    // consecutive [B]F16 elements for a 128-bit buffer store.  WMMA v2/v3 and
+    // non-transposed WMMAv1 use different low-bit ownership and are rejected
+    // above instead of sharing this proof.
     std::vector<std::vector<int32_t>> dimNBases(wmmaLL.getOutDimSizeLog2(dimN));
     std::generate(dimNBases.begin(), dimNBases.end(),
                   [i = 0]() mutable { return std::vector<int32_t>{1 << i++}; });

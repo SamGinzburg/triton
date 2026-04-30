@@ -223,3 +223,42 @@ module attributes {"ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 32 : i32}
     tt.return
   }
 }
+
+// -----
+// WMMA v1 integer dots accumulate into i32. The wide-store helper currently
+// only proves [B]F16 result stores, so this path must bypass shared memory
+// without introducing the WMMA-v1 #linear store layout.
+// CHECK-LABEL: wmma_v1_i8_i32_should_skip
+// CHECK-NOT: #linear
+// CHECK-NOT: ttg.convert_layout %{{.*}} -> tensor<128x128xi32, #blocked>
+// CHECK: tt.store %{{.*}} : tensor<128x128x!tt.ptr<i32>, #mma>
+#blocked = #ttg.blocked<{sizePerThread = [1, 1], threadsPerWarp = [16, 2], warpsPerCTA = [2, 4], order = [1, 0]}>
+#mma = #ttg.amd_wmma<{version = 1, isTranspose = true, ctaLayout = {warp = [[0, 1], [0, 2], [1, 0]]}}>
+module attributes {"ttg.num-warps" = 8 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @wmma_v1_i8_i32_should_skip(%arg0: !tt.ptr<i32>) {
+    %cst = arith.constant dense<0> : tensor<128x128xi32, #mma>
+    %cst_0 = arith.constant dense<1> : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>
+    %cst_1 = arith.constant dense<1> : tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>
+    %0 = tt.dot %cst_0, %cst_1, %cst : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> -> tensor<128x128xi32, #mma>
+    %1 = ttg.convert_layout %0 : tensor<128x128xi32, #mma> -> tensor<128x128xi32, #blocked>
+    %2 = tt.splat %arg0 : !tt.ptr<i32> -> tensor<128x128x!tt.ptr<i32>, #blocked>
+    tt.store %2, %1 : tensor<128x128x!tt.ptr<i32>, #blocked>
+    tt.return
+  }
+
+  // CHECK-LABEL: wmma_v1_i8_store_should_skip
+  // CHECK-NOT: #linear
+  // CHECK-NOT: ttg.convert_layout %{{.*}} -> tensor<128x128xi32, #blocked>
+  // CHECK: tt.store %{{.*}} : tensor<128x128x!tt.ptr<i8>, #mma>
+  tt.func public @wmma_v1_i8_store_should_skip(%arg0: !tt.ptr<i8>) {
+    %cst = arith.constant dense<0> : tensor<128x128xi32, #mma>
+    %cst_0 = arith.constant dense<1> : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>>
+    %cst_1 = arith.constant dense<1> : tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>>
+    %0 = tt.dot %cst_0, %cst_1, %cst : tensor<128x128xi8, #ttg.dot_op<{opIdx = 0, parent = #mma, kWidth = 16}>> * tensor<128x128xi8, #ttg.dot_op<{opIdx = 1, parent = #mma, kWidth = 16}>> -> tensor<128x128xi32, #mma>
+    %1 = ttg.convert_layout %0 : tensor<128x128xi32, #mma> -> tensor<128x128xi32, #blocked>
+    %2 = arith.trunci %1 : tensor<128x128xi32, #blocked> to tensor<128x128xi8, #blocked>
+    %3 = tt.splat %arg0 : !tt.ptr<i8> -> tensor<128x128x!tt.ptr<i8>, #blocked>
+    tt.store %3, %2 : tensor<128x128x!tt.ptr<i8>, #blocked>
+    tt.return
+  }
+}
