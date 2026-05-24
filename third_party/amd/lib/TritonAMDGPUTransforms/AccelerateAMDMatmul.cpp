@@ -334,6 +334,7 @@ OperandTypesVector getOperandTypesForWmmaOp(PatternRewriter &rewriter,
   Type f16 = rewriter.getF16Type();
   Type f32 = rewriter.getF32Type();
   Type bf16 = rewriter.getBF16Type();
+  Type i4 = rewriter.getIntegerType(4);
   Type i8 = rewriter.getIntegerType(8);
   Type i32 = rewriter.getIntegerType(32);
   SmallVector<OperandTypesVector> applicableTypes = {
@@ -343,10 +344,10 @@ OperandTypesVector getOperandTypesForWmmaOp(PatternRewriter &rewriter,
       {i8, i8, i32, i32},
       // {f16, f16, f16, f16},
       // {bf16, bf16, bf16, bf16},
-      // {i4, i4, i32, i32} - are supported configurations
-      // by WMMA instruction, but not supported by triton
       // clang-format on
   };
+  if (version == 1 || version == 2)
+    applicableTypes.push_back({i4, i4, i32, i32});
   if (version == 2 || version == 3) {
     Type fp8e4nv = rewriter.getType<Float8E4M3FNType>();
     Type fp8e5 = rewriter.getType<Float8E5M2Type>();
@@ -1414,6 +1415,31 @@ FailureOr<WmmaIntrinsic> chooseWmmaInstruction(tt::DotOp dot,
       operandTypes[1], operandTypes[2], dot.getA().getType().getShape().back());
 }
 
+FailureOr<WmmaIntrinsic> chooseWmmaInstruction(tt::DotPackedOp dot,
+                                               int wmmaVersion) {
+  auto ctx = dot.getContext();
+  Type i4 = IntegerType::get(ctx, 4);
+  Type i32 = IntegerType::get(ctx, 32);
+  int64_t logicalK = dot.getA().getType().getShape().back() * 2;
+  return chooseWmmaInstruction(dot.getLoc(), wmmaVersion, dot.getC().getType(),
+                               i4, i4, i32, logicalK);
+}
+
+static bool isInt4DotScaledOp(tt::DotScaledOp dot) {
+  return dot.getAElemType() == tt::ScaleDotElemType::INT4 &&
+         dot.getBElemType() == tt::ScaleDotElemType::INT4;
+}
+
+FailureOr<WmmaIntrinsic> chooseWmmaInstruction(tt::DotScaledOp dot,
+                                               int wmmaVersion) {
+  auto ctx = dot.getContext();
+  Type i4 = IntegerType::get(ctx, 4);
+  Type i32 = IntegerType::get(ctx, 32);
+  int64_t logicalK = dot.getA().getType().getShape().back() * 2;
+  return chooseWmmaInstruction(dot.getLoc(), wmmaVersion, dot.getC().getType(),
+                               i4, i4, i32, logicalK);
+}
+
 class BlockedToWMMA : public OpRewritePattern<tt::DotOp> {
   int wmmaVersion;
 
@@ -1533,6 +1559,213 @@ public:
     auto newDot = tt::DotOp::create(
         rewriter, dotOp.getLoc(), newRetType, castedA, castedB, newAcc,
         dotOp.getInputPrecision(), dotOp.getMaxNumImpreciseAcc());
+
+    Value dotOutput = convertAndCastTensor(rewriter, newDot, oldRetEncoding,
+                                           oldRetType.getElementType());
+    rewriter.replaceOp(dotOp, dotOutput);
+    return success();
+  }
+};
+
+class ScaledBlockedToWMMAI4 : public OpRewritePattern<tt::DotScaledOp> {
+  int wmmaVersion;
+
+public:
+  ScaledBlockedToWMMAI4(MLIRContext *context, int wmmaVersion,
+                        PatternBenefit benefit = 1)
+      : OpRewritePattern(context, benefit), wmmaVersion(wmmaVersion) {}
+
+  LogicalResult matchAndRewrite(tt::DotScaledOp dotOp,
+                                PatternRewriter &rewriter) const override {
+    if (!isInt4DotScaledOp(dotOp))
+      return rewriter.notifyMatchFailure(dotOp, "expected int4 dot_scaled");
+    if (dotOp.getAScale() || dotOp.getBScale())
+      return rewriter.notifyMatchFailure(
+          dotOp, "int4 WMMA dot_scaled expects no scale operands");
+    if (!dotOp.getLhsKPack() || !dotOp.getRhsKPack())
+      return rewriter.notifyMatchFailure(
+          dotOp, "int4 WMMA dot_scaled currently requires K-packed operands");
+
+    auto ctx = dotOp->getContext();
+    Value a = dotOp.getA();
+    Value b = dotOp.getB();
+
+    auto oldRetType = cast<RankedTensorType>(dotOp.getResult().getType());
+    auto oldRetEncoding = oldRetType.getEncoding();
+    if (!oldRetEncoding || !isa<ttg::BlockedEncodingAttr>(oldRetEncoding))
+      return rewriter.notifyMatchFailure(
+          dotOp, "expected `BlockedEncodingAttr` for the result type");
+
+    auto oldAType = cast<RankedTensorType>(a.getType());
+    auto oldBType = cast<RankedTensorType>(b.getType());
+    auto retShape = oldRetType.getShape();
+    auto aShape = oldAType.getShape();
+    auto bShape = oldBType.getShape();
+
+    if (aShape.back() == 1)
+      return rewriter.notifyMatchFailure(dotOp,
+                                         "Skipping WMMA for dot op with K=1");
+
+    FailureOr<WmmaIntrinsic> wmmaInstr =
+        chooseWmmaInstruction(dotOp, wmmaVersion);
+    if (failed(wmmaInstr))
+      return rewriter.notifyMatchFailure(
+          dotOp, "Unable to choose WMMA intrinsic for int4 dot_scaled");
+
+    auto mDim = wmmaInstr->mDim;
+    auto nDim = wmmaInstr->nDim;
+    auto logicalKDim = wmmaInstr->kDim;
+    auto logicalKBase = wmmaInstr->kBase;
+    assert(logicalKDim % 2 == 0 && logicalKBase % 2 == 0);
+    auto packedKDim = logicalKDim / 2;
+    auto packedKWidth = logicalKBase / 2;
+
+    int numWarps = ttg::lookupNumWarps(dotOp);
+    auto cgaLayout = ttg::getCGALayout(oldRetEncoding);
+    auto retShapePerCTA =
+        ttg::getShapePerCTA(cgaLayout.getCTASplitNum(), retShape);
+    auto warpsPerTile =
+        planWarps(dotOp, retShapePerCTA, numWarps, {mDim, nDim});
+
+    bool isTransposed = true;
+    SmallVector<unsigned> tilesPerWarp(retShape.size(), 1u);
+    auto ctaLayout = ttg::chooseWmmaCTALinearLayout(
+        ctx, retShape.size(), warpsPerTile, tilesPerWarp);
+
+    auto wmmaEnc =
+        ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, ctaLayout,
+                                      isTransposed, cgaLayout,
+                                      {mDim, nDim, logicalKDim});
+    ttg::AMDWmmaEncodingAttr wmmaPackedEnc = wmmaEnc;
+    if (wmmaVersion != 1)
+      wmmaPackedEnc =
+          ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, ctaLayout,
+                                        isTransposed, cgaLayout,
+                                        {mDim, nDim, packedKDim});
+
+    Type i32 = rewriter.getIntegerType(32);
+    auto newRetType = RankedTensorType::get(retShape, i32, wmmaEnc);
+
+    auto oldAcc = dotOp.getC();
+    auto newAcc = convertAndCastTensor(rewriter, oldAcc, wmmaEnc, i32);
+
+    auto aDotEnc =
+        ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaPackedEnc, packedKWidth);
+    auto bDotEnc =
+        ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaPackedEnc, packedKWidth);
+    auto newAType =
+        RankedTensorType::get(aShape, oldAType.getElementType(), aDotEnc);
+    auto newBType =
+        RankedTensorType::get(bShape, oldBType.getElementType(), bDotEnc);
+
+    Value castedA =
+        ttg::ConvertLayoutOp::create(rewriter, a.getLoc(), newAType, a);
+    Value castedB =
+        ttg::ConvertLayoutOp::create(rewriter, b.getLoc(), newBType, b);
+    auto newDot = tt::DotScaledOp::create(
+        rewriter, dotOp.getLoc(), newRetType, castedA, castedB, newAcc,
+        Value(), Value(), dotOp.getAElemType(), dotOp.getBElemType(),
+        dotOp.getFastMath(), dotOp.getLhsKPack(), dotOp.getRhsKPack());
+
+    Value dotOutput = convertAndCastTensor(rewriter, newDot, oldRetEncoding,
+                                           oldRetType.getElementType());
+    rewriter.replaceOp(dotOp, dotOutput);
+    return success();
+  }
+};
+
+class PackedBlockedToWMMAI4 : public OpRewritePattern<tt::DotPackedOp> {
+  int wmmaVersion;
+
+public:
+  PackedBlockedToWMMAI4(MLIRContext *context, int wmmaVersion,
+                        PatternBenefit benefit = 1)
+      : OpRewritePattern(context, benefit), wmmaVersion(wmmaVersion) {}
+
+  LogicalResult matchAndRewrite(tt::DotPackedOp dotOp,
+                                PatternRewriter &rewriter) const override {
+    if (!dotOp.getLhsKPack() || !dotOp.getRhsKPack())
+      return rewriter.notifyMatchFailure(
+          dotOp, "packed int4 WMMA currently requires K-packed operands");
+
+    auto ctx = dotOp->getContext();
+    Value a = dotOp.getA();
+    Value b = dotOp.getB();
+
+    auto oldRetType = cast<RankedTensorType>(dotOp.getResult().getType());
+    auto oldRetEncoding = oldRetType.getEncoding();
+    if (!oldRetEncoding || !isa<ttg::BlockedEncodingAttr>(oldRetEncoding))
+      return rewriter.notifyMatchFailure(
+          dotOp, "expected `BlockedEncodingAttr` for the result type");
+
+    auto oldAType = cast<RankedTensorType>(a.getType());
+    auto oldBType = cast<RankedTensorType>(b.getType());
+    auto retShape = oldRetType.getShape();
+    auto aShape = oldAType.getShape();
+    auto bShape = oldBType.getShape();
+
+    if (aShape.back() == 1)
+      return rewriter.notifyMatchFailure(dotOp,
+                                         "Skipping WMMA for dot op with K=1");
+
+    FailureOr<WmmaIntrinsic> wmmaInstr =
+        chooseWmmaInstruction(dotOp, wmmaVersion);
+    if (failed(wmmaInstr))
+      return rewriter.notifyMatchFailure(
+          dotOp, "Unable to choose WMMA intrinsic for packed int4 dot");
+
+    auto mDim = wmmaInstr->mDim;
+    auto nDim = wmmaInstr->nDim;
+    auto logicalKDim = wmmaInstr->kDim;
+    auto logicalKBase = wmmaInstr->kBase;
+    assert(logicalKDim % 2 == 0 && logicalKBase % 2 == 0);
+    auto packedKDim = logicalKDim / 2;
+    auto packedKWidth = logicalKBase / 2;
+
+    int numWarps = ttg::lookupNumWarps(dotOp);
+    auto cgaLayout = ttg::getCGALayout(oldRetEncoding);
+    auto retShapePerCTA =
+        ttg::getShapePerCTA(cgaLayout.getCTASplitNum(), retShape);
+    auto warpsPerTile =
+        planWarps(dotOp, retShapePerCTA, numWarps, {mDim, nDim});
+
+    bool isTransposed = true;
+    SmallVector<unsigned> tilesPerWarp(retShape.size(), 1u);
+    auto ctaLayout = ttg::chooseWmmaCTALinearLayout(ctx, retShape.size(),
+                                                    warpsPerTile, tilesPerWarp);
+
+    auto wmmaEnc =
+        ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, ctaLayout, isTransposed,
+                                      cgaLayout, {mDim, nDim, logicalKDim});
+    ttg::AMDWmmaEncodingAttr wmmaPackedEnc = wmmaEnc;
+    if (wmmaVersion != 1)
+      wmmaPackedEnc =
+          ttg::AMDWmmaEncodingAttr::get(ctx, wmmaVersion, ctaLayout,
+                                        isTransposed, cgaLayout,
+                                        {mDim, nDim, packedKDim});
+
+    Type i32 = rewriter.getIntegerType(32);
+    auto newRetType = RankedTensorType::get(retShape, i32, wmmaEnc);
+
+    auto oldAcc = dotOp.getC();
+    auto newAcc = convertAndCastTensor(rewriter, oldAcc, wmmaEnc, i32);
+
+    auto aDotEnc =
+        ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaPackedEnc, packedKWidth);
+    auto bDotEnc =
+        ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaPackedEnc, packedKWidth);
+    auto newAType =
+        RankedTensorType::get(aShape, oldAType.getElementType(), aDotEnc);
+    auto newBType =
+        RankedTensorType::get(bShape, oldBType.getElementType(), bDotEnc);
+
+    Value castedA =
+        ttg::ConvertLayoutOp::create(rewriter, a.getLoc(), newAType, a);
+    Value castedB =
+        ttg::ConvertLayoutOp::create(rewriter, b.getLoc(), newBType, b);
+    auto newDot = tt::DotPackedOp::create(
+        rewriter, dotOp.getLoc(), newRetType, castedA, castedB, newAcc,
+        dotOp.getLhsKPack(), dotOp.getRhsKPack());
 
     Value dotOutput = convertAndCastTensor(rewriter, newDot, oldRetEncoding,
                                            oldRetType.getElementType());
@@ -1763,6 +1996,10 @@ struct TritonAMDGPUAccelerateMatmulPass
     case ISAFamily::RDNA4:
       ttg::populateDecomposeScaledBlockedPatterns(mfmaPatterns,
                                                   /*benefit=*/3);
+      mfmaPatterns.add<::ScaledBlockedToWMMAI4>(context, wmmaVersion,
+                                                /*benefit=*/4);
+      mfmaPatterns.add<::PackedBlockedToWMMAI4>(context, wmmaVersion,
+                                                /*benefit=*/3);
       mfmaPatterns.add<::BlockedToWMMA>(context, wmmaVersion,
                                         matrixInstructionSize,
                                         /*benefit=*/2);

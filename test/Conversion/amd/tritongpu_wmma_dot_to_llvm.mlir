@@ -1,4 +1,5 @@
 // RUN: triton-opt %s --split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1100 --convert-builtin-func-to-llvm | FileCheck %s
+// RUN: triton-opt %s --split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1151 --convert-builtin-func-to-llvm | FileCheck %s
 // RUN: triton-opt %s --split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1200 --convert-builtin-func-to-llvm | FileCheck %s
 // RUN: triton-opt %s --split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1250 --convert-builtin-func-to-llvm | FileCheck %s --check-prefixes=GFX1250
 
@@ -175,6 +176,24 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.thr
     // CHECK: llvm.bitcast %{{.*}} : vector<16xi4> to vector<2xi32>
     // CHECK: wmma.i32.16x16x32.iu4{{.*}} : (i1, vector<2xi32>, i1, vector<2xi32>, vector<8xi32>, i1) -> vector<8xi32>
     %0 = tt.dot %arg0, %arg1, %arg2 {inputPrecision = 2 : i32, maxNumImpreciseAcc = 0 : i32} : tensor<16x32xi4, #ttg.dot_op<{opIdx = 0, parent = #mma2_i4, kWidth = 16}>> * tensor<32x16xi4, #ttg.dot_op<{opIdx = 1, parent = #mma2_i4, kWidth = 16}>> -> tensor<16x16xi32, #mma2_i4>
+    // CHECK-COUNT-8: llvm.insertelement {{.*}} : vector<1xi32>
+    %ptr0 = tt.splat %arg3 : !tt.ptr<i32> -> tensor<16x16x!tt.ptr<i32>, #mma2_i4>
+    tt.store %ptr0, %0 : tensor<16x16x!tt.ptr<i32>, #mma2_i4>
+    tt.return
+  }
+
+  //  CHECK-LABEL: wmma2_dot_scaled_int4_32
+  tt.func @wmma2_dot_scaled_int4_32(%arg0: tensor<16x16xi8, #ttg.dot_op<{opIdx = 0, parent = #mma2_transposed, kWidth = 8}>>, %arg1: tensor<16x16xi8, #ttg.dot_op<{opIdx = 1, parent = #mma2_transposed, kWidth = 8}>>, %arg2: tensor<16x16xi32, #mma2_i4>, %arg3: !tt.ptr<i32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}) {
+    // CHECK-COUNT-8: llvm.extractvalue %{{.*}} : !llvm.struct<(i32, i32, i32, i32, i32, i32, i32, i32)>
+    // CHECK-COUNT-8: llvm.extractvalue %{{.*}} : !llvm.struct<(i8, i8, i8, i8, i8, i8, i8, i8)>
+    // CHECK-COUNT-8: llvm.insertelement {{.*}} : vector<8xi8>
+    // CHECK: llvm.bitcast %{{.*}} : vector<8xi8> to vector<2xi32>
+    // CHECK-COUNT-8: llvm.extractvalue %{{.*}} : !llvm.struct<(i8, i8, i8, i8, i8, i8, i8, i8)>
+    // CHECK-COUNT-8: llvm.insertelement {{.*}} : vector<8xi8>
+    // CHECK: llvm.bitcast %{{.*}} : vector<8xi8> to vector<2xi32>
+    // CHECK-NOT: wmma.i32.16x16x16.iu8
+    // CHECK: wmma.i32.16x16x32.iu4{{.*}} : (i1, vector<2xi32>, i1, vector<2xi32>, vector<8xi32>, i1) -> vector<8xi32>
+    %0 = tt.dot_scaled %arg0, %arg1, %arg2 lhs = int4 rhs = int4 {fastMath = false} : tensor<16x16xi8, #ttg.dot_op<{opIdx = 0, parent = #mma2_transposed, kWidth = 8}>> * tensor<16x16xi8, #ttg.dot_op<{opIdx = 1, parent = #mma2_transposed, kWidth = 8}>> -> tensor<16x16xi32, #mma2_i4>
     // CHECK-COUNT-8: llvm.insertelement {{.*}} : vector<1xi32>
     %ptr0 = tt.splat %arg3 : !tt.ptr<i32> -> tensor<16x16x!tt.ptr<i32>, #mma2_i4>
     tt.store %ptr0, %0 : tensor<16x16x!tt.ptr<i32>, #mma2_i4>

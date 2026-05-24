@@ -136,7 +136,7 @@ def TT_InputPrecisionAttr : I32EnumAttr<
   let cppNamespace = "::mlir::triton";
 }
 
-// Type for ScaleDotElemType kind of floats.
+// Logical operand element type for dot_scaled.
 def TT_ScaleDotElemTypeAttr : I32EnumAttr<
     "ScaleDotElemType", "",
     [
@@ -146,7 +146,8 @@ def TT_ScaleDotElemTypeAttr : I32EnumAttr<
       I32EnumAttrCase<"E3M2", 3, "e3m2">,
       I32EnumAttrCase<"E2M1", 4, "e2m1">,
       I32EnumAttrCase<"BF16", 5, "bf16">,
-      I32EnumAttrCase<"FP16", 6, "fp16">
+      I32EnumAttrCase<"FP16", 6, "fp16">,
+      I32EnumAttrCase<"INT4", 7, "int4">
     ]>{
   let cppNamespace = "::mlir::triton";
 }

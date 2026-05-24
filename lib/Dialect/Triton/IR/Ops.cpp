@@ -290,18 +290,76 @@ bool DotOp::verifyDims() {
   return aShape[aShape.size() - 1] == bShape[aShape.size() - 2];
 }
 
+//-- DotPackedOp --
+bool DotPackedOp::verifyDims() {
+  auto aShape = this->getA().getType().getShape();
+  auto bShape = this->getB().getType().getShape();
+
+  auto aKdim = aShape[aShape.size() - 1];
+  auto bKdim = bShape[bShape.size() - 2];
+  if (this->getLhsKPack())
+    aKdim *= 2;
+  if (this->getRhsKPack())
+    bKdim *= 2;
+
+  return aKdim == bKdim;
+}
+
+bool DotPackedOp::verifyOutputDims() {
+  auto cShape = this->getC().getType().getShape();
+  auto oMdim = cShape[cShape.size() - 2];
+  auto oNdim = cShape[cShape.size() - 1];
+  auto aShape = this->getA().getType().getShape();
+  auto bShape = this->getB().getType().getShape();
+  auto adim = aShape[aShape.size() - 2];
+  auto bdim = bShape[bShape.size() - 1];
+  if (!this->getLhsKPack())
+    adim *= 2;
+  if (!this->getRhsKPack())
+    bdim *= 2;
+  return adim == oMdim && bdim == oNdim;
+}
+
+LogicalResult DotPackedOp::verify() {
+  if (!getLhsKPack() || !getRhsKPack())
+    return emitError("packed int4 dot currently only supports K-packed "
+                     "operands");
+
+  auto aTy = getA().getType();
+  auto bTy = getB().getType();
+  auto cTy = getC().getType();
+  auto dTy = getD().getType();
+  if (!aTy.getElementType().isInteger(8) ||
+      !bTy.getElementType().isInteger(8))
+    return emitError("packed int4 dot operands must be packed in i8 tensors");
+  if (!cTy.getElementType().isInteger(32) ||
+      !dTy.getElementType().isInteger(32))
+    return emitError("packed int4 dot accumulator and result must be i32");
+  return success();
+}
+
 //-- DotScaledOp --
+static bool isPacked4BitDotElemType(ScaleDotElemType elemType) {
+  return elemType == ScaleDotElemType::E2M1 ||
+         elemType == ScaleDotElemType::INT4;
+}
+
+static bool isInt4DotScaledOp(DotScaledOp op) {
+  return op.getAElemType() == ScaleDotElemType::INT4 ||
+         op.getBElemType() == ScaleDotElemType::INT4;
+}
+
 bool DotScaledOp::verifyDims() {
   auto aShape = this->getA().getType().getShape();
   auto bShape = this->getB().getType().getShape();
 
   auto aKdim = aShape[aShape.size() - 1];
-  auto bKdim = bShape[aShape.size() - 2];
-  if (this->getAElemType() == ScaleDotElemType::E2M1) {
+  auto bKdim = bShape[bShape.size() - 2];
+  if (isPacked4BitDotElemType(this->getAElemType())) {
     if (this->getLhsKPack())
       aKdim *= 2;
   }
-  if (this->getBElemType() == ScaleDotElemType::E2M1) {
+  if (isPacked4BitDotElemType(this->getBElemType())) {
     if (this->getRhsKPack())
       bKdim *= 2;
   }
@@ -317,11 +375,11 @@ bool DotScaledOp::verifyOutputDims() {
   auto bShape = this->getB().getType().getShape();
   auto adim = aShape[aShape.size() - 2];
   auto bdim = bShape[bShape.size() - 1];
-  if (this->getAElemType() == ScaleDotElemType::E2M1) {
+  if (isPacked4BitDotElemType(this->getAElemType())) {
     if (!this->getLhsKPack())
       adim *= 2;
   }
-  if (this->getBElemType() == ScaleDotElemType::E2M1) {
+  if (isPacked4BitDotElemType(this->getBElemType())) {
     if (!this->getRhsKPack())
       bdim *= 2;
   }
@@ -331,13 +389,44 @@ bool DotScaledOp::verifyOutputDims() {
 }
 
 LogicalResult DotScaledOp::verify() {
+  bool isInt4 = isInt4DotScaledOp(*this);
+  if (isInt4) {
+    if (getAElemType() != ScaleDotElemType::INT4 ||
+        getBElemType() != ScaleDotElemType::INT4)
+      return emitError("int4 dot_scaled requires both operands to use int4");
+    if (!getLhsKPack() || !getRhsKPack())
+      return emitError("int4 dot_scaled currently only supports K-packed "
+                       "operands");
+    auto aTy = getA().getType();
+    auto bTy = getB().getType();
+    auto cTy = getC().getType();
+    auto dTy = getD().getType();
+    if (!aTy.getElementType().isInteger(8) ||
+        !bTy.getElementType().isInteger(8))
+      return emitError("int4 dot_scaled operands must be packed in i8 "
+                       "tensors");
+    if (!cTy.getElementType().isInteger(32) ||
+        !dTy.getElementType().isInteger(32))
+      return emitError("int4 dot_scaled accumulator and result must be i32");
+    if (getAScale() || getBScale())
+      return emitError("int4 dot_scaled with i32 accumulation does not take "
+                       "scale operands");
+  } else {
+    auto cTy = getC().getType();
+    auto dTy = getD().getType();
+    if (!isa<FloatType>(cTy.getElementType()) ||
+        !isa<FloatType>(dTy.getElementType()))
+      return emitError("non-int4 dot_scaled accumulator and result must be "
+                       "floating-point tensors");
+  }
+
   auto aShape = this->getA().getType().getShape();
   int64_t rank = aShape.size();
   if (rank < 2)
     return this->emitError("operands must be at least 2D");
 
   auto k = aShape[rank - 1];
-  if (this->getAElemType() == ScaleDotElemType::E2M1) {
+  if (isPacked4BitDotElemType(this->getAElemType())) {
     if (this->getLhsKPack())
       k *= 2;
   }
@@ -388,7 +477,7 @@ LogicalResult deduceScaleFactor(ArrayRef<int64_t> lhsShape,
     if (llvm::product_of(*scaleShape) == 1)
       return 0;
 
-    int64_t unpackFactor = (format == ScaleDotElemType::E2M1 && kPack) ? 2 : 1;
+    int64_t unpackFactor = (isPacked4BitDotElemType(format) && kPack) ? 2 : 1;
     int64_t kdim = operandShape[opIdx == 0 ? operandShape.size() - 1
                                            : operandShape.size() - 2] *
                    unpackFactor;

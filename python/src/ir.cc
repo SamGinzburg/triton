@@ -318,6 +318,7 @@ void init_triton_ir(py::module &&m) {
       .value("E2M1", ScaleDotElemType::E2M1)
       .value("BF16", ScaleDotElemType::BF16)
       .value("FP16", ScaleDotElemType::FP16)
+      .value("INT4", ScaleDotElemType::INT4)
       .export_values();
 
   py::class_<MLIRContext>(m, "context", py::module_local())
@@ -998,6 +999,10 @@ void init_triton_ir(py::module &&m) {
            [](TritonOpBuilder &self) -> Type {
              return self.getBuilder().getI1Type();
            }) // or ret::copy?
+      .def("get_int4_ty",
+           [](TritonOpBuilder &self) -> Type {
+             return self.getBuilder().getIntegerType(4);
+           })
       .def("get_int8_ty",
            [](TritonOpBuilder &self) -> Type {
              return self.getBuilder().getI8Type();
@@ -1698,6 +1703,13 @@ void init_triton_ir(py::module &&m) {
                  c.getType(), lhs, rhs, c, lhs_scale.value_or(Value()),
                  rhs_scale.value_or(Value()), lhs_format, rhs_format, fast_math,
                  lhs_k_pack, rhs_k_pack);
+           })
+      .def("create_dot_packed",
+           [](TritonOpBuilder &self, mlir::Value &a, mlir::Value &b,
+              mlir::Value &c, bool lhs_k_pack, bool rhs_k_pack)
+               -> mlir::Value {
+             return self.create<DotPackedOp>(c.getType(), a, b, c, lhs_k_pack,
+                                             rhs_k_pack);
            })
       .def("create_floor",
            [](TritonOpBuilder &self, Value &val) -> Value {

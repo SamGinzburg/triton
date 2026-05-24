@@ -1033,6 +1033,8 @@ static Type getScaledMMAOperandType(Type elementType,
     return BFloat16Type::get(ctx);
   case ScaleDotElemType::FP16:
     return Float16Type::get(ctx);
+  case ScaleDotElemType::INT4:
+    return IntegerType::get(ctx, 4);
   }
   llvm_unreachable("Unsupported type.");
 };

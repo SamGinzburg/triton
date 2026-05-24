@@ -203,6 +203,7 @@ def ty_to_cpp(ty):
         return "TDMDescriptor"
     return {
         "i1": "int8_t",
+        "i4": "int8_t",
         "i8": "int8_t",
         "i16": "int16_t",
         "i32": "int32_t",

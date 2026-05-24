@@ -150,6 +150,7 @@ def _get_np_dtype(tt_dtype):
         tl.float16: np.dtype(np.float16),
         tl.float32: np.dtype(np.float32),
         tl.float64: np.dtype(np.float64),
+        tl.int4: np.dtype(np.int8),
         tl.int8: np.dtype(np.int8),
         tl.uint8: np.dtype(np.uint8),
         tl.int16: np.dtype(np.int16),
@@ -316,6 +317,18 @@ def _unpack_e2m1(data, axis):
     return np.moveaxis(unpacked, -1, axis)
 
 
+def _unpack_int4(data, axis):
+    data = np.moveaxis(data, axis, -1)
+    low = (data & np.uint8(0x0F)).astype(np.int8)
+    high = ((data >> np.uint8(4)) & np.uint8(0x0F)).astype(np.int8)
+    low = np.where(low >= 8, low - 16, low).astype(np.int8)
+    high = np.where(high >= 8, high - 16, high).astype(np.int8)
+    unpacked = np.empty(data.shape[:-1] + (data.shape[-1] * 2, ), dtype=np.int8)
+    unpacked[..., 0::2] = low
+    unpacked[..., 1::2] = high
+    return np.moveaxis(unpacked, -1, axis)
+
+
 def _prepare_dot_scaled_operand(value_handle, scale_handle, format_enum, k_pack, is_rhs):
     if format_enum == _ir.ScaleDotElemTypeTY.E2M1:
         if is_rhs:
@@ -323,13 +336,22 @@ def _prepare_dot_scaled_operand(value_handle, scale_handle, format_enum, k_pack,
         else:
             unpack_axis = -1 if k_pack else -2
         value = _unpack_e2m1(value_handle.data, unpack_axis)
+    elif format_enum == _ir.ScaleDotElemTypeTY.INT4:
+        if is_rhs:
+            unpack_axis = -2 if k_pack else -1
+        else:
+            unpack_axis = -1 if k_pack else -2
+        value = _unpack_int4(value_handle.data, unpack_axis).astype(np.int32)
     else:
         value = _mxfp_value_handle_to_float32(value_handle)
 
     if scale_handle is None:
         return value
 
-    scale = _e8m0_to_f32(scale_handle.data)
+    if format_enum == _ir.ScaleDotElemTypeTY.INT4:
+        scale = scale_handle.data.astype(np.float32)
+    else:
+        scale = _e8m0_to_f32(scale_handle.data)
 
     if is_rhs:
         # rhs is in [K, N] layout, but rhs_scale is supplied as [N, K / group].
@@ -709,6 +731,12 @@ class InterpreterBuilder:
             b_data = _convert_float(b_data, b.dtype, tl.float16, None).view(np.float16)
         return TensorHandle(np.matmul(a_data, b_data, dtype=d.data.dtype) + d.data, d.dtype.scalar)
 
+    def create_dot_packed(self, a, b, d, lhs_k_pack, rhs_k_pack):
+        assert lhs_k_pack and rhs_k_pack, "interpreter only supports K-packed int4 dot"
+        a_data = _unpack_int4(a.data, -1).astype(np.int32)
+        b_data = _unpack_int4(b.data, -2).astype(np.int32)
+        return TensorHandle(np.matmul(a_data, b_data, dtype=d.data.dtype) + d.data, d.dtype.scalar)
+
     def create_make_range(self, ret_ty, start, stop):
         return TensorHandle(np.arange(start, stop, dtype=np.int32), tl.int32)
 
@@ -877,8 +905,8 @@ class InterpreterBuilder:
         lhs_data = _prepare_dot_scaled_operand(lhs, lhs_scale_handle, lhs_format_enum, lhs_k_pack, is_rhs=False)
         rhs_data = _prepare_dot_scaled_operand(rhs, rhs_scale_handle, rhs_format_enum, rhs_k_pack, is_rhs=True)
 
-        result = np.matmul(lhs_data, rhs_data) + acc_handle.data
-        return TensorHandle(result, tl.float32)
+        result = np.matmul(lhs_data, rhs_data, dtype=acc_handle.data.dtype) + acc_handle.data
+        return TensorHandle(result, acc_handle.dtype.scalar)
 
 
 _MISSING = object()

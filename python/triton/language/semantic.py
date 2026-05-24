@@ -1427,9 +1427,9 @@ class TritonSemantic(Generic[TensorTy]):
             # All combinations of supported fp8 x fp8 are permitted
             pass
         else:
-            assert lhs.dtype in (tl.int8, tl.uint8, tl.float16, tl.bfloat16, tl.float32,
+            assert lhs.dtype in (tl.int4, tl.int8, tl.uint8, tl.float16, tl.bfloat16, tl.float32,
                                  tl.float64), f"Unsupported lhs dtype {lhs.dtype}"
-            assert rhs.dtype in (tl.int8, tl.uint8, tl.float16, tl.bfloat16, tl.float32,
+            assert rhs.dtype in (tl.int4, tl.int8, tl.uint8, tl.float16, tl.bfloat16, tl.float32,
                                  tl.float64), f"Unsupported rhs dtype {rhs.dtype}"
             assert lhs.dtype == rhs.dtype, f"Both operands must be same dtype. Got {lhs.dtype} and {rhs.dtype}"
 
@@ -1471,7 +1471,7 @@ class TritonSemantic(Generic[TensorTy]):
             and rhs.shape[-1].value >= min_dot_size[1], \
                 f"Input shapes should have M >= {min_dot_size[0]}, N >= {min_dot_size[1]} and K >= {min_dot_size[2]}"
         if lhs.type.scalar.is_int():
-            assert lhs.type.scalar == tl.int8, "only int8 supported!"
+            assert lhs.type.scalar in (tl.int4, tl.int8), "only int4 and int8 supported!"
             _0 = self.builder.get_int32(0)
             ret_scalar_ty = tl.int32
         elif out_dtype.is_bf16():
@@ -1512,10 +1512,116 @@ class TritonSemantic(Generic[TensorTy]):
         return self.tensor(
             self.builder.create_dot(lhs.handle, rhs.handle, acc_handle, input_precision, max_num_imprecise_acc), ret_ty)
 
+    def dot_packed(self, lhs: TensorTy, rhs: TensorTy, acc: TensorTy | None, lhs_format: str, rhs_format: str,
+                   lhs_k_pack: bool, rhs_k_pack: bool, out_dtype: tl.dtype) -> TensorTy:
+        assert lhs.type.is_block() and rhs.type.is_block()
+        assert lhs_format == rhs_format == "int4", "only packed int4 dot is supported"
+        assert lhs_k_pack and rhs_k_pack, "packed int4 dot currently only supports K-packed operands"
+        assert lhs.dtype == tl.uint8, f"packed int4 lhs must be stored as uint8. Got {lhs.dtype}"
+        assert rhs.dtype == tl.uint8, f"packed int4 rhs must be stored as uint8. Got {rhs.dtype}"
+
+        lhs_rank = len(lhs.shape)
+        rhs_rank = len(rhs.shape)
+        assert lhs_rank == rhs_rank == 2 or lhs_rank == rhs_rank == 3, f"Both inputs must be either 2D or 3D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
+        assert lhs.shape[-1].value == rhs.shape[
+            -2].value, f"Packed input shapes ({lhs.shape}) and {rhs.shape} are not compatible for matmul"
+
+        M = lhs.type.shape[-2]
+        N = rhs.type.shape[-1]
+        B = lhs.type.shape[0] if lhs_rank == 3 else None
+        ret_scalar_ty = tl.int32
+        ret_ty = tl.block_type(ret_scalar_ty, [B, M, N] if B else [M, N])
+        _0 = self.builder.get_int32(0)
+        if acc is None:
+            acc_handle = self.builder.create_splat(ret_ty.to_ir(self.builder), _0)
+        else:
+            acc_handle = acc.handle
+            assert acc.type.shape == ret_ty.shape and acc.type.element_ty == ret_scalar_ty
+
+        return self.tensor(
+            self.builder.create_dot_packed(lhs.handle, rhs.handle, acc_handle, lhs_k_pack, rhs_k_pack), ret_ty)
+
+    def _int4_scale_is_none(self, scale) -> bool:
+        return scale is None or (isinstance(scale, tl.constexpr) and scale.value is None)
+
+    def _apply_int4_dot_scale(self, result: TensorTy, scale, is_rhs: bool) -> TensorTy:
+        if self._int4_scale_is_none(scale):
+            return result
+
+        scale = self.cast(self.to_tensor(scale), tl.float32)
+        if scale.type.is_block():
+            if len(scale.shape) == len(result.shape) - 1:
+                scale = self.expand_dims(scale, len(scale.shape))
+            while len(scale.shape) < len(result.shape):
+                scale = self.expand_dims(scale, 0)
+
+            if scale.type.numel != 1:
+                assert len(scale.shape) == len(result.shape), \
+                    f"int4 dot_scaled scale rank must broadcast to output rank; got {scale.shape} for {result.shape}"
+                assert scale.shape[-1] == 1, \
+                    f"int4 dot_scaled currently expects one K-scale subchannel per dot call. Got scale shape {scale.shape}"
+                expected_dim = result.shape[-1] if is_rhs else result.shape[-2]
+                dim_name = "N" if is_rhs else "M"
+                assert scale.shape[-2] == expected_dim, \
+                    f"int4 dot_scaled {dim_name} scale dimension must match output {dim_name}; got {scale.shape}"
+
+            if is_rhs:
+                dims = list(range(len(scale.shape) - 2)) + [len(scale.shape) - 1, len(scale.shape) - 2]
+                scale = self.permute(scale, dims)
+
+        return self.mul(result, scale, sanitize_overflow=False)
+
+    def dot_scaled_int4_mma(self, lhs: TensorTy, rhs: TensorTy, acc: TensorTy | None, fast_math: bool,
+                            lhs_k_pack: bool, rhs_k_pack: bool) -> TensorTy:
+        assert lhs.type.is_block() and rhs.type.is_block()
+        assert lhs_k_pack and rhs_k_pack, "int4 dot_scaled currently only supports K-packed operands"
+        assert lhs.dtype == tl.uint8, f"int4 dot_scaled lhs must be stored as uint8. Got {lhs.dtype}"
+        assert rhs.dtype == tl.uint8, f"int4 dot_scaled rhs must be stored as uint8. Got {rhs.dtype}"
+
+        lhs_rank = len(lhs.shape)
+        rhs_rank = len(rhs.shape)
+        assert lhs_rank == rhs_rank == 2 or lhs_rank == rhs_rank == 3, f"Both inputs must be either 2D or 3D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
+        assert lhs.shape[-1].value == rhs.shape[
+            -2].value, f"Packed input shapes ({lhs.shape}) and {rhs.shape} are not compatible for int4 matmul"
+
+        M = lhs.type.shape[-2]
+        N = rhs.type.shape[-1]
+        B = lhs.type.shape[0] if lhs_rank == 3 else None
+        ret_ty = tl.block_type(tl.int32, [B, M, N] if B else [M, N])
+        _0 = self.builder.get_int32(0)
+        if acc is None:
+            acc_handle = self.builder.create_splat(ret_ty.to_ir(self.builder), _0)
+        else:
+            acc_handle = acc.handle
+            assert acc.type.shape == ret_ty.shape and acc.type.element_ty == tl.int32
+
+        int4_format = self._str_to_fp_type("int4")
+        return self.tensor(
+            self.builder.create_dot_scaled(lhs.handle, None, int4_format, rhs.handle, None, int4_format, fast_math,
+                                           lhs_k_pack, rhs_k_pack, acc_handle), ret_ty)
+
+    def dot_scaled_int4(self, lhs: TensorTy, lhs_scale, rhs: TensorTy, rhs_scale, acc: TensorTy | None,
+                        fast_math: bool, lhs_k_pack: bool, rhs_k_pack: bool, out_dtype: tl.dtype) -> TensorTy:
+        if out_dtype == tl.int32:
+            assert self._int4_scale_is_none(lhs_scale) and self._int4_scale_is_none(rhs_scale), \
+                "int4 dot_scaled with out_dtype=tl.int32 requires lhs_scale and rhs_scale to be None"
+            return self.dot_scaled_int4_mma(lhs, rhs, acc, fast_math, lhs_k_pack, rhs_k_pack)
+
+        assert out_dtype == tl.float32, "Only float32 and unscaled int32 are supported for int4 dot_scaled"
+        dot = self.dot_scaled_int4_mma(lhs, rhs, None, fast_math, lhs_k_pack, rhs_k_pack)
+        result = self.cast(dot, tl.float32)
+        result = self._apply_int4_dot_scale(result, lhs_scale, is_rhs=False)
+        result = self._apply_int4_dot_scale(result, rhs_scale, is_rhs=True)
+
+        if acc is not None:
+            assert acc.type.shape == result.type.shape and acc.type.element_ty == out_dtype
+            result = self.add(result, acc, sanitize_overflow=False)
+        return result
+
     def _str_to_fp_type(self, float_format: str):
         ty_enum = getattr(ir.ScaleDotElemTypeTY, float_format.upper(), None)
         if ty_enum is None:
-            raise ValueError(f"Invalid float format: {float_format}.")
+            raise ValueError(f"Invalid dot_scaled format: {float_format}.")
         return ty_enum
 
     def _bitcast_to_fp_type(self, val: TensorTy, float_format: str):
@@ -1526,8 +1632,8 @@ class TritonSemantic(Generic[TensorTy]):
         triton_ty = {"e5m2": tl.float8e5, "e4m3": tl.float8e4nv, "bf16": tl.bfloat16, "fp16":
                      tl.float16}.get(float_format)
         if triton_ty is None:
-            assert float_format == "e2m1", f"Internal Error: Unexpected float format: {float_format}"
-            assert val.dtype == tl.uint8, f"e2m1 format must be packed as uint8. Got {val.dtype}"
+            assert float_format in ("e2m1", "int4"), f"Internal Error: Unexpected dot_scaled format: {float_format}"
+            assert val.dtype == tl.uint8, f"{float_format} format must be packed as uint8. Got {val.dtype}"
             return val
         if val.dtype == triton_ty:
             return val
@@ -1567,11 +1673,15 @@ class TritonSemantic(Generic[TensorTy]):
         lhs_rank = len(lhs.shape)
         rhs_rank = len(rhs.shape)
         assert lhs_rank == rhs_rank == 2 or lhs_rank == rhs_rank == 3, f"Both inputs must be either 2D or 3D; (lhs: {lhs.shape} vs rhs: {rhs.shape})"
-        lhs_format_enum = self._str_to_fp_type(lhs_format)
-        rhs_format_enum = self._str_to_fp_type(rhs_format)
-        allowed_formats = {"e2m1", "e4m3", "e5m2", "bf16", "fp16"}
+        allowed_formats = {"int4", "e2m1", "e4m3", "e5m2", "bf16", "fp16"}
         assert lhs_format in allowed_formats, f"NYI: lhs_format {lhs_format}"
         assert rhs_format in allowed_formats, f"NYI: rhs_format {rhs_format}"
+        if lhs_format == "int4" or rhs_format == "int4":
+            assert lhs_format == rhs_format == "int4", "int4 dot_scaled requires both operands to use format='int4'"
+            return self.dot_scaled_int4(lhs, lhs_scale, rhs, rhs_scale, acc, fast_math, lhs_k_pack, rhs_k_pack,
+                                        out_dtype)
+        lhs_format_enum = self._str_to_fp_type(lhs_format)
+        rhs_format_enum = self._str_to_fp_type(rhs_format)
         rhs_scale_is_none = rhs_scale is None or (isinstance(rhs_scale, tl.constexpr) and rhs_scale.value is None)
         lhs_scale_is_none = lhs_scale is None or (isinstance(lhs_scale, tl.constexpr) and lhs_scale.value is None)
         lhs = self._bitcast_to_fp_type(lhs, lhs_format)

@@ -197,6 +197,8 @@ Value createScaleInstDescriptor(ConversionPatternRewriter &rewriter,
       return 4;
     case ScaleDotElemType::E2M1:
       return !isMXF4 ? 5 : 1;
+    case ScaleDotElemType::INT4:
+      break;
     default:
       break;
     }
@@ -595,6 +597,8 @@ int64_t getFormatBitSize(ScaleDotElemType type) {
   case ScaleDotElemType::E3M2:
     return 6;
   case ScaleDotElemType::E2M1:
+    return 4;
+  case ScaleDotElemType::INT4:
     return 4;
   default:
     llvm_unreachable("Unsupported type.");

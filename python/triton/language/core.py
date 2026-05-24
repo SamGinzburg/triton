@@ -388,7 +388,7 @@ def check_bit_width(value, shift_value):
 
 
 class dtype(base_type):
-    SINT_TYPES = ['int8', 'int16', 'int32', 'int64']
+    SINT_TYPES = ['int4', 'int8', 'int16', 'int32', 'int64']
     UINT_TYPES = ['int1', 'uint8', 'uint16', 'uint32', 'uint64']
     FP_TYPES = ['fp8e4b15', 'fp8e4nv', 'fp8e4b8', 'fp8e5', 'fp8e5b16', 'fp16', 'bf16', 'fp32', 'fp64']
     STANDARD_FP_TYPES = ['fp16', 'bf16', 'fp32', 'fp64']
@@ -478,6 +478,9 @@ class dtype(base_type):
 
     def is_int1(self):
         return self.name == 'int1'
+
+    def is_int4(self):
+        return self.name == 'int4'
 
     def is_int8(self):
         return self.name == 'int8'
@@ -591,6 +594,8 @@ class dtype(base_type):
             return builder.get_void_ty()
         elif self.name == 'int1':
             return builder.get_int1_ty()
+        elif self.name == 'int4':
+            return builder.get_int4_ty()
         elif self.name in ('int8', 'uint8'):
             return builder.get_int8_ty()
         elif self.name in ('int16', 'uint16'):
@@ -806,6 +811,7 @@ class slice_type(dtype):
 # scalar types
 void = dtype('void')
 int1 = dtype('int1')
+int4 = dtype('int4')
 int8 = dtype('int8')
 int16 = dtype('int16')
 int32 = dtype('int32')
@@ -830,6 +836,8 @@ pi32_t = pointer_type(int32)
 def get_int_dtype(bitwidth: int, signed: bool) -> dtype:
     if bitwidth == 1:
         return int1
+    elif bitwidth == 4 and signed:
+        return int4
     elif bitwidth == 8 and signed:
         return int8
     elif bitwidth == 8 and not signed:
@@ -2365,9 +2373,9 @@ def dot(input, other, acc=None, input_precision=None, allow_tf32=None, max_num_i
       the data using `TensorDescriptor` with `round_f32_to_tf32=True`.
 
     :param input: The first tensor to be multiplied.
-    :type input: 2D or 3D tensor of scalar-type in {:code:`int8`, :code:`float8_e5m2`, :code:`float16`, :code:`bfloat16`, :code:`float32`}
+    :type input: 2D or 3D tensor of scalar-type in {:code:`int4`, :code:`int8`, :code:`float8_e5m2`, :code:`float16`, :code:`bfloat16`, :code:`float32`}
     :param other: The second tensor to be multiplied.
-    :type other: 2D or 3D tensor of scalar-type in {:code:`int8`, :code:`float8_e5m2`, :code:`float16`, :code:`bfloat16`, :code:`float32`}
+    :type other: 2D or 3D tensor of scalar-type in {:code:`int4`, :code:`int8`, :code:`float8_e5m2`, :code:`float16`, :code:`bfloat16`, :code:`float32`}
     :param acc: The accumulator tensor. If not None, the result is added to this tensor.
     :type acc: 2D or 3D tensor of scalar-type in {:code:`float16`, :code:`float32`, :code:`int32`}
     :param input_precision: How to exercise the Tensor Cores for f32 x f32. If
@@ -2389,7 +2397,6 @@ def dot(input, other, acc=None, input_precision=None, allow_tf32=None, max_num_i
     out_dtype = _unwrap_if_constexpr(out_dtype)
     max_num_imprecise_acc = _unwrap_if_constexpr(max_num_imprecise_acc)
     acc = _unwrap_if_constexpr(acc)
-
     # check shapes make sense:
     a_shape = list(input.shape)
     b_shape = list(other.shape)
@@ -2437,20 +2444,29 @@ def dot_scaled(lhs, lhs_scale, lhs_format, rhs, rhs_scale, rhs_format, acc=None,
     the other input is also upcasted to :code:`fp16` element type instead.
     This behavior is experimental and may be subject to change in the future.
 
+    Packed int4 operands also use this API. When both int4 scales are :code:`None`,
+    pass :code:`out_dtype=tl.int32` to keep the packed integer dot result and
+    accumulator in :code:`int32`. When int4 scales are provided, the result is
+    :code:`float32`; current int4 scale support expects one scale subchannel per
+    dot call, with lhs scales shaped like :code:`[M, 1]` and rhs scales shaped
+    like :code:`[N, 1]` for a 2D dot.
+
     :param lhs: The first tensor to be multiplied.
-    :type lhs: 2D tensor representing fp4, fp8 or bf16 elements. Fp4 elements are packed into uint8 inputs with the first element in lower bits. Fp8 are stored as uint8 or the corresponding fp8 type.
-    :param lhs_scale: Scale factor for lhs tensor. Shape should be [M, K//group_size] when lhs is [M, K], where group_size is 32 if scales type are `e8m0`.
-    :type lhs_scale: e8m0 type represented as an uint8 tensor, or None.
-    :param lhs_format: format of the lhs tensor. Available formats: {:code:`e2m1`, :code:`e4m3`, :code:`e5m2`, :code:`bf16`, :code:`fp16`}.
+    :type lhs: 2D tensor representing int4, fp4, fp8 or bf16 elements. Int4 and fp4 elements are packed into uint8 inputs with the first element in lower bits. Fp8 are stored as uint8 or the corresponding fp8 type.
+    :param lhs_scale: Scale factor for lhs tensor. Shape should be [M, K//group_size] when lhs is [M, K], where group_size is 32 if scales type are `e8m0`. For int4, pass ordinary numeric scales for the current packed K subchannel.
+    :type lhs_scale: e8m0 type represented as an uint8 tensor, numeric tensor for int4, or None.
+    :param lhs_format: format of the lhs tensor. Available formats: {:code:`int4`, :code:`e2m1`, :code:`e4m3`, :code:`e5m2`, :code:`bf16`, :code:`fp16`}.
     :type lhs_format: str
     :param rhs: The second tensor to be multiplied.
-    :type rhs: 2D tensor representing fp4, fp8 or bf16 elements. Fp4 elements are packed into uint8 inputs with the first element in lower bits. Fp8 are stored as uint8 or the corresponding fp8 type.
+    :type rhs: 2D tensor representing int4, fp4, fp8 or bf16 elements. Int4 and fp4 elements are packed into uint8 inputs with the first element in lower bits. Fp8 are stored as uint8 or the corresponding fp8 type.
     :param rhs_scale: Scale factor for rhs tensor. Shape should be [N, K//group_size] where rhs is [K, N].
                       Important: Do NOT transpose rhs_scale
-    :type rhs_scale: e8m0 type represented as an uint8 tensor, or None.
-    :param rhs_format: format of the rhs tensor. Available formats: {:code:`e2m1`, :code:`e4m3`, :code:`e5m2`, :code:`bf16`, :code:`fp16`}.
+    :type rhs_scale: e8m0 type represented as an uint8 tensor, numeric tensor for int4, or None.
+    :param rhs_format: format of the rhs tensor. Available formats: {:code:`int4`, :code:`e2m1`, :code:`e4m3`, :code:`e5m2`, :code:`bf16`, :code:`fp16`}.
     :type rhs_format: str
-    :param acc: The accumulator tensor. If not None, the result is added to this tensor.
+    :param acc: The accumulator tensor. If not None, the result is added to this tensor. For int4 with :code:`out_dtype=tl.int32`, this must be an int32 tensor; otherwise it must be a float32 tensor.
+    :param out_dtype: Output dtype. For int4 with no scales, :code:`tl.int32` keeps accumulation and output in int32; otherwise only :code:`tl.float32` is supported.
+    :type out_dtype: tl.dtype, optional
     :param lhs_k_pack: If false, the lhs tensor is packed into uint8 along M dimension.
     :type lhs_k_pack: bool, optional
     :param rhs_k_pack: If false, the rhs tensor is packed into uint8 along N dimension.
@@ -2463,7 +2479,10 @@ def dot_scaled(lhs, lhs_scale, lhs_format, rhs, rhs_scale, rhs_format, acc=None,
     out_dtype = _unwrap_if_constexpr(out_dtype)
     lhs_k_pack = _unwrap_if_constexpr(lhs_k_pack)
     rhs_k_pack = _unwrap_if_constexpr(rhs_k_pack)
-    assert out_dtype == float32, "Only float32 is supported for out_dtype at the moment"
+    if lhs_format == "int4" or rhs_format == "int4":
+        assert out_dtype in (float32, int32), "Only float32 and unscaled int32 are supported for int4 dot_scaled"
+    else:
+        assert out_dtype == float32, "Only float32 is supported for out_dtype at the moment"
     return _semantic.dot_scaled(lhs, lhs_scale, lhs_format, rhs, rhs_scale, rhs_format, acc, fast_math, lhs_k_pack,
                                 rhs_k_pack, out_dtype)
 

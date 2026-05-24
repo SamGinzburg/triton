@@ -579,6 +579,192 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   return success();
 }
 
+// Packed int4 dot uses i8 tensors as the physical storage while selecting the
+// logical signed-i4 WMMA intrinsic.  This mirrors the scaled FP4 path: operand
+// layouts are built with half the logical K, but the intrinsic and sign flags
+// are driven by the logical element type.
+template <typename DotOpTy, typename DotOpAdaptorTy>
+LogicalResult convertPackedI4Dot(DotOpTy op, DotOpAdaptorTy adaptor,
+                                 ConversionPatternRewriter &rewriter,
+                                 const LLVMTypeConverter *typeConverter) {
+  auto wmmaLayout = cast<AMDWmmaEncodingAttr>(
+      cast<RankedTensorType>(op.getResult().getType()).getEncoding());
+  int wmmaVer = wmmaLayout.getVersion();
+  auto ctx = op.getContext();
+  auto mnkDim = wmmaLayout.getInstrShape();
+
+  auto loc = op.getLoc();
+  auto tb = TritonLLVMOpBuilder(loc, rewriter);
+  Value a = op.getA();
+  Value b = op.getB();
+  Value d = op.getD();
+  auto aTensorTy = cast<RankedTensorType>(a.getType());
+  auto bTensorTy = cast<RankedTensorType>(b.getType());
+  auto dTensorTy = cast<RankedTensorType>(d.getType());
+  auto physicalAElemTy = aTensorTy.getElementType();
+  auto physicalBElemTy = bTensorTy.getElementType();
+  auto logicalI4Ty = IntegerType::get(ctx, 4);
+  auto dElemTy = dTensorTy.getElementType();
+
+  FailureOr<WmmaIntrinsic> maybeWmmaIntrinsic =
+      wmmaLayout.getIsTransposed()
+          ? WmmaIntrinsic::get(wmmaVer, mnkDim[1], mnkDim[0], mnkDim[2],
+                               logicalI4Ty, logicalI4Ty, dElemTy)
+          : WmmaIntrinsic::get(wmmaVer, mnkDim[0], mnkDim[1], mnkDim[2],
+                               logicalI4Ty, logicalI4Ty, dElemTy);
+  if (failed(maybeWmmaIntrinsic)) {
+    return op.emitError("no matching packed int4 matrix core intrinsic ")
+           << "for wmma version " << wmmaVer << " with instruction shape ["
+           << mnkDim[0] << ", " << mnkDim[1] << ", " << mnkDim[2]
+           << "] and result element type D=" << dElemTy << ".";
+  }
+
+  unsigned logicalKInstrSize = maybeWmmaIntrinsic->kDim;
+  unsigned logicalKBase = maybeWmmaIntrinsic->kBase;
+  assert(logicalKInstrSize % 2 == 0 && logicalKBase % 2 == 0);
+  unsigned packedKInstrSize = logicalKInstrSize / 2;
+  unsigned packedKBase = logicalKBase / 2;
+  std::string intrinsicName = maybeWmmaIntrinsic->name.str();
+
+  auto resShape = dTensorTy.getShape();
+  auto rank = resShape.size();
+  auto K = aTensorTy.getShape()[rank - 1];
+
+  auto tile = wmmaLayout.getTileLayout(rank);
+  auto wmmaLL = triton::gpu::toLinearLayout(resShape, wmmaLayout);
+  auto repLayout = wmmaRepLayoutForTensor(wmmaLL, tile);
+  if (!repLayout.has_value()) {
+    return op.emitError("failed to divide wmma layout by tile layout");
+  }
+  const unsigned numRepK =
+      std::max(static_cast<unsigned>(K / packedKInstrSize), 1u);
+
+  Value loadedA = adaptor.getA();
+  Value loadedB = adaptor.getB();
+  Value loadedC = adaptor.getC();
+  auto aLayout = triton::gpu::toLinearLayout(aTensorTy);
+  auto bLayout = triton::gpu::toLinearLayout(bTensorTy);
+
+  auto aEnc = cast<DotOperandEncodingAttr>(aTensorTy.getEncoding());
+  auto bEnc = cast<DotOperandEncodingAttr>(bTensorTy.getEncoding());
+  auto kDimTensorA = aTensorTy.getShape().back();
+  auto kDimTensorB = bTensorTy.getShape()[rank - 2];
+
+  auto dstElemTy = dTensorTy.getElementType();
+  auto fc = unpackLLElements(loc, loadedC, rewriter);
+
+  unsigned warpSize = gpu::lookupThreadsPerWarp(rewriter);
+  constexpr unsigned vgprElemBitWidth = 32;
+  unsigned paddedOutputElemSize =
+      wmmaVer == 1 ? vgprElemBitWidth / dstElemTy.getIntOrFloatBitWidth() : 1;
+  auto elemsPerVec = mnkDim[0] * mnkDim[1] * paddedOutputElemSize / warpSize;
+  auto dElemsToStorePerThread = mnkDim[0] * mnkDim[1] / warpSize;
+  auto vecTy = vec_ty(dstElemTy, elemsPerVec);
+
+  StringAttr kRegister = S("register");
+  StringAttr kLane = S("lane");
+  StringAttr kWarp = S("warp");
+  StringAttr kBlock = S("block");
+
+  llvm::DenseSet<uint64_t> mnProcessed;
+  int tiedGroup = 1;
+
+  for (int reg = 0; reg < repLayout->getInDimSize(kRegister);
+       reg += dElemsToStorePerThread) {
+    auto repIndices = repLayout->apply(
+        {{kRegister, reg}, {kLane, 0}, {kWarp, 0}, {kBlock, 0}});
+    int batchIdx = (rank == 3 ? repIndices[0].second : 0);
+    int m = repIndices[rank == 3 ? 1 : 0].second;
+    int n = repIndices[rank == 3 ? 2 : 1].second;
+
+    int nextMReg = reg + dElemsToStorePerThread;
+    std::optional<int> nextM;
+    if (paddedOutputElemSize == 2) {
+      if (mnProcessed.count(packMN((uint32_t)m, (uint32_t)n))) {
+        continue;
+      }
+      nextM = findNextM(*repLayout, nextMReg, dElemsToStorePerThread, m, rank);
+      if (nextM.has_value()) {
+        tiedGroup = 2;
+        mnProcessed.insert(packMN((uint32_t)m, (uint32_t)n));
+        mnProcessed.insert(packMN((uint32_t)nextM.value(), (uint32_t)n));
+        intrinsicName += ".tied";
+      }
+    }
+
+    Value acc = tb.undef(vecTy);
+    auto selectRegValue = [&](int subTied) {
+      return (subTied == 0) ? reg : nextMReg;
+    };
+
+    for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
+      for (int subTied = 0; subTied < tiedGroup; ++subTied) {
+        acc = tb.insert_element(vecTy, acc, fc[selectRegValue(subTied) + v],
+                                tb.i32_val(v * paddedOutputElemSize + subTied));
+      }
+    }
+    for (size_t k = 0; k < numRepK; ++k) {
+      auto ha = getOperandVals(
+          rewriter, typeConverter, aLayout, loadedA,
+          /*opIdx*/ 0, rank, batchIdx, m, k, packedKInstrSize, packedKBase,
+          kDimTensorA, aEnc, warpSize, /*opScale*/ nullptr, physicalAElemTy,
+          loc);
+      ha = prepareOperands(rewriter, ha, logicalI4Ty, wmmaVer, logicalKBase,
+                           loc);
+      ha = maskRepeatedKLanes(rewriter, loc, aLayout, aEnc, ha, warpSize);
+
+      auto hb = getOperandVals(
+          rewriter, typeConverter, bLayout, loadedB,
+          /*opIdx*/ 1, rank, batchIdx, n, k, packedKInstrSize, packedKBase,
+          kDimTensorB, bEnc, warpSize, /*opScale*/ nullptr, physicalBElemTy,
+          loc);
+      hb = prepareOperands(rewriter, hb, logicalI4Ty, wmmaVer, logicalKBase,
+                           loc);
+      hb = maskRepeatedKLanes(rewriter, loc, bLayout, bEnc, hb, warpSize);
+
+      Value haNext;
+      if (tiedGroup == 2) {
+        haNext = getOperandVals(
+            rewriter, typeConverter, aLayout, loadedA,
+            /*opIdx*/ 0, rank, batchIdx, nextM.value(), k,
+            packedKInstrSize, packedKBase, kDimTensorA, aEnc, warpSize,
+            nullptr, physicalAElemTy, loc);
+
+        haNext = prepareOperands(rewriter, haNext, logicalI4Ty, wmmaVer,
+                                 logicalKBase, loc);
+        haNext =
+            maskRepeatedKLanes(rewriter, loc, aLayout, aEnc, haNext, warpSize);
+      }
+
+      for (int subTied = 0; subTied < tiedGroup; ++subTied) {
+        auto optTied =
+            tiedGroup == 2 ? std::optional<bool>(subTied != 0) : std::nullopt;
+        auto aValue = subTied == 0 ? ha : haNext;
+        acc = wmmaLayout.getIsTransposed()
+                  ? generateWMMAOp(rewriter, loc, wmmaVer, hb, aValue, acc,
+                                   logicalI4Ty, logicalI4Ty, dstElemTy,
+                                   intrinsicName, optTied)
+                  : generateWMMAOp(rewriter, loc, wmmaVer, aValue, hb, acc,
+                                   logicalI4Ty, logicalI4Ty, dstElemTy,
+                                   intrinsicName, optTied);
+      }
+    }
+    for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
+      for (int subTied = 0; subTied < tiedGroup; ++subTied) {
+        fc[selectRegValue(subTied) + v] = tb.extract_element(
+            dstElemTy, acc, tb.i32_val(v * paddedOutputElemSize + subTied));
+      }
+    }
+  }
+
+  Type structTy = LLVM::LLVMStructType::getLiteral(
+      wmmaLayout.getContext(), SmallVector<Type>(fc.size(), dstElemTy));
+  Value res = packLLElements(loc, typeConverter, fc, rewriter, structTy);
+
+  rewriter.replaceOp(op, res);
+  return success();
+}
+
 // For asymmetric WMMA (e.g. 32x16) with isTransposed=true the dot's operand A
 // is 16xK and operand B is Kx32, but the intrinsic expects A as 32xK and B as
 // Kx16, so we swap A and B and adjust the layouts for the operands and scale
@@ -805,10 +991,46 @@ LogicalResult convertWMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
   return convertDot(op, adaptor, rewriter, typeConverter);
 }
 
+LogicalResult convertPackedWMMA(triton::DotPackedOp op,
+                                triton::DotPackedOp::Adaptor adaptor,
+                                const LLVMTypeConverter *typeConverter,
+                                ConversionPatternRewriter &rewriter) {
+  auto rankedTType = [](Value tensor) {
+    return cast<RankedTensorType>(tensor.getType());
+  };
+
+  assert(isa<DotOperandEncodingAttr>(rankedTType(op.getA()).getEncoding()) &&
+         isa<DotOperandEncodingAttr>(rankedTType(op.getB()).getEncoding()) &&
+         "Both A and B should be DotOperand layout.");
+
+  auto cTensorTy = rankedTType(op.getC());
+  auto dTensorTy = rankedTType(op.getD());
+  assert(isa<AMDWmmaEncodingAttr>(cTensorTy.getEncoding()) &&
+         "Currently, we only support C with a wmma layout.");
+
+  assert(cTensorTy.getShape()[0] == dTensorTy.getShape()[0] &&
+         cTensorTy.getShape()[1] == dTensorTy.getShape()[1] &&
+         "DotPackedOp's C operand should pass the same number of values as D");
+
+  return convertPackedI4Dot(op, adaptor, rewriter, typeConverter);
+}
+
 LogicalResult convertScaledWMMA(triton::DotScaledOp op,
                                 triton::DotScaledOp::Adaptor adaptor,
                                 const LLVMTypeConverter *typeConverter,
                                 ConversionPatternRewriter &rewriter) {
+  bool isInt4 = op.getAElemType() == triton::ScaleDotElemType::INT4 ||
+                op.getBElemType() == triton::ScaleDotElemType::INT4;
+  if (isInt4) {
+    if (op.getAElemType() != triton::ScaleDotElemType::INT4 ||
+        op.getBElemType() != triton::ScaleDotElemType::INT4)
+      return op.emitError("int4 dot_scaled requires both operands to be int4");
+    if (op.getAScale() || op.getBScale())
+      return op.emitError("int4 dot_scaled WMMA lowering expects no scale "
+                          "operands");
+    return convertPackedI4Dot(op, adaptor, rewriter, typeConverter);
+  }
+
   assert(isa<LinearEncodingAttr>(op.getAScale().getType().getEncoding()) &&
          isa<LinearEncodingAttr>(op.getBScale().getType().getEncoding()) &&
          "Both LhsScale and RhsScale should be linear layout.");

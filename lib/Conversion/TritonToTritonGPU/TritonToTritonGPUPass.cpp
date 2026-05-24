@@ -527,7 +527,8 @@ void populateTritonPatterns(TritonGPUTypeConverter &typeConverter,
       GenericOpPattern<triton::DescriptorLoadOp>,
       GenericOpPattern<triton::DescriptorStoreOp>,
       GenericOpPattern<triton::DescriptorReduceOp>,
-      // this assumes the right layout will be set later for dot scaled.
+      // this assumes the right layout will be set later for packed/scaled dots.
+      GenericOpPattern<triton::DotPackedOp>,
       GenericOpPattern<triton::DotScaledOp>
       // clang-format on
       >(typeConverter, context);

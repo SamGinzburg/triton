@@ -27,6 +27,11 @@ LogicalResult convertWMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                           const LLVMTypeConverter *typeConverter,
                           ConversionPatternRewriter &rewriter);
 
+LogicalResult convertPackedWMMA(triton::DotPackedOp op,
+                                triton::DotPackedOp::Adaptor adaptor,
+                                const LLVMTypeConverter *typeConverter,
+                                ConversionPatternRewriter &rewriter);
+
 LogicalResult convertScaledWMMA(triton::DotScaledOp op,
                                 triton::DotScaledOp::Adaptor adaptor,
                                 const LLVMTypeConverter *typeConverter,
@@ -93,6 +98,24 @@ struct ScaledDotOpConversion
         "Unsupported DotScaleOp found when converting TritonGPU to LLVM.");
   }
 };
+
+struct PackedDotOpConversion
+    : public ConvertOpToLLVMPattern<triton::DotPackedOp> {
+  using ConvertOpToLLVMPattern::ConvertOpToLLVMPattern;
+
+  LogicalResult
+  matchAndRewrite(triton::DotPackedOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto dType = op.getD().getType();
+    auto dEncoding = dType.getEncoding();
+
+    if (isa<AMDWmmaEncodingAttr>(dEncoding))
+      return AMD::convertPackedWMMA(op, adaptor, getTypeConverter(), rewriter);
+
+    return rewriter.notifyMatchFailure(
+        op, "packed int4 dot currently lowers only through AMD WMMA");
+  }
+};
 } // namespace
 
 namespace mlir::triton::AMD {
@@ -102,5 +125,6 @@ void populateDotOpToLLVMPatterns(LLVMTypeConverter &typeConverter,
                                  PatternBenefit benefit) {
   patterns.add<DotOpConversion>(typeConverter, benefit);
   patterns.add<ScaledDotOpConversion>(typeConverter, benefit);
+  patterns.add<PackedDotOpConversion>(typeConverter, benefit);
 }
 } // namespace mlir::triton::AMD

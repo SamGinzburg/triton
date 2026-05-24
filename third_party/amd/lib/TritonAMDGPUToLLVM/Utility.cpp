@@ -751,6 +751,8 @@ Type scaleDotElemTypeToMLIRType(MLIRContext *ctx, triton::ScaleDotElemType t) {
     return Float6E2M3FNType::get(ctx);
   case triton::ScaleDotElemType::E2M1:
     return Float4E2M1FNType::get(ctx);
+  case triton::ScaleDotElemType::INT4:
+    return IntegerType::get(ctx, 4);
   default:
     llvm_unreachable("unsupported ScaleDotElemType!");
   }

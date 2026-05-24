@@ -1649,7 +1649,59 @@ LinearLayout chooseScaledMfmaScaleLayout(MLIRContext *ctx, int dotOperandIdx,
 
 std::optional<LinearLayout>
 chooseMfmaLikeStoreLayout(RankedTensorType valType) {
-  // TODO: WMMA Support on RDNA
+  if (auto wmmaLayout = dyn_cast<AMDWmmaEncodingAttr>(valType.getEncoding())) {
+    Type elemType = valType.getElementType();
+    auto valShape = valType.getShape();
+    auto mnkDim = wmmaLayout.getInstrShape();
+    bool isSupportedElementType =
+        elemType.isF16() || elemType.isBF16() || elemType.isInteger(32);
+    if (!(valType.getRank() == 2 && isSupportedElementType &&
+          wmmaLayout.getVersion() == 1 && wmmaLayout.getIsTransposed() &&
+          mnkDim[0] == 16 && mnkDim[1] == 16 && mnkDim[2] == 16))
+      return {};
+
+    LinearLayout wmmaLL = wmmaLayout.toLinearLayout(valShape);
+    MLIRContext *ctx = wmmaLayout.getContext();
+    StringAttr kLane = S("lane");
+    if (wmmaLL.getInDimSize(kLane) != 32)
+      return {};
+
+    auto wmmaOutDims = llvm::to_vector(wmmaLL.getOutDimNames());
+    StringAttr dimM = wmmaOutDims[0];
+    StringAttr dimN = wmmaOutDims[1];
+    if (wmmaLL.getOutDimSizeLog2(dimN) < 4)
+      return {};
+
+    auto swapLL = LinearLayout::empty();
+    // The rows are kept as is with an identity linear layout.
+    swapLL *= LinearLayout::identity1D(valShape[0], dimM, dimM);
+
+    // AMDWmmaEncodingAttr::getTileLayout models transposed WMMAv1 16x16x16
+    // results with the low N bases split as:
+    //   register: N1, N2, N3
+    //   lane:     N0
+    // A thread's registers therefore cover every other element along N; memory
+    // lowering cannot form a b128 store while the fastest N bit is owned by
+    // lane id. Rotate only the low four N bases:
+    //   [N0, N1, N2, N3] -> [N3, N0, N1, N2]
+    // After composition, the register bases are N0/N1/N2 and lane bit 16 owns
+    // N3. This keeps M, warp, and higher-tile bases unchanged, so the mapping
+    // remains a bijective warp-local reshuffle while each thread exposes eight
+    // consecutive [B]F16 elements, or two groups of four i32 elements, for
+    // 128-bit buffer stores. WMMA v2/v3 and non-transposed WMMAv1 use
+    // different low-bit ownership and are rejected above instead of sharing
+    // this proof.
+    std::vector<std::vector<int32_t>> dimNBases(wmmaLL.getOutDimSizeLog2(dimN));
+    std::generate(dimNBases.begin(), dimNBases.end(),
+                  [i = 0]() mutable { return std::vector<int32_t>{1 << i++}; });
+    std::rotate(dimNBases.begin(), dimNBases.begin() + 3,
+                dimNBases.begin() + 4);
+    swapLL *= LinearLayout({{dimN, dimNBases}}, {dimN});
+
+    return wmmaLL.compose(swapLL);
+  }
+
+  // TODO: Extend this helper to WMMA v2/v3 on RDNA4.
   if (!isa<AMDMfmaEncodingAttr>(valType.getEncoding()))
     return {};
   auto mfmaLayout = cast<AMDMfmaEncodingAttr>(valType.getEncoding());

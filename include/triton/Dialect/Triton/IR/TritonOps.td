@@ -666,6 +666,41 @@ def TT_DotOp : TT_Op<"dot", [Pure,
     let hasVerifier = 1;
 }
 
+//
+// DotPacked Op
+//
+def TT_DotPackedOp : TT_Op<"dot_packed", [Pure,
+                             DeclareOpInterfaceMethods<DotOpInterface, ["verifyDims", "verifyOutputDims"]>,
+                             TypesMatchWith<"result's type matches accumulator's type",
+                                            "d", "c", "$_self">]> {
+    let summary = "dot with packed sub-byte integer operands";
+
+    let description = [{
+        $d = matrix_multiply(unpack_i4($a), unpack_i4($b)) + $c.
+        Operands are stored packed in pairs in I8 tensors.  The first element
+        is stored in the low nibble and the second element is stored in the
+        high nibble.
+    }];
+
+    let arguments = (
+      ins
+      RankedTensorOf<[I8]>:$a,
+      RankedTensorOf<[I8]>:$b,
+      TT_IntTensor:$c,
+      DefaultValuedAttr<BoolAttr, "true">:$lhs_k_pack,
+      DefaultValuedAttr<BoolAttr, "true">:$rhs_k_pack
+    );
+
+    let results = (outs TT_IntTensor:$d);
+
+    let assemblyFormat = [{
+      $a`,` $b`,` $c attr-dict `:`
+      type($a) `*` type($b) `->` type($d)
+    }];
+
+    let hasVerifier = 1;
+}
+
 
 //
 // DotScaled Op
@@ -680,15 +715,17 @@ def TT_DotScaledOp : TT_Op<"dot_scaled", [Pure,
     let description = [{
         $d = matrix_multiply(scale($a, $a_scale), scale($b, $b_scale)) + $c.
         Where scale(x, s) is a function that applies the scale per block following microscaling spec.
+        For packed int4 inputs, this op can also represent the unscaled integer
+        MMA form with i8 physical operands and i32 accumulator/result tensors.
     }];
 
     let arguments = (
       ins
-      // inputs are floats if we have a type for them, otherwise (fp4),
-      // they are packed in pairs in an I8Tensor
+      // Inputs are floats if we have a type for them, otherwise sub-byte
+      // formats such as fp4/int4 are packed in pairs in an I8Tensor.
       RankedTensorOf<[TT_Float,I8]>:$a,
       RankedTensorOf<[TT_Float,I8]>:$b,
-      TT_FloatTensor:$c,
+      TT_FpIntTensor:$c,
       Optional<RankedTensorOf<[TT_Float, I8]>>:$a_scale,
       Optional<RankedTensorOf<[TT_Float, I8]>>:$b_scale,
       TT_ScaleDotElemTypeAttr:$a_elem_type,
@@ -698,7 +735,7 @@ def TT_DotScaledOp : TT_Op<"dot_scaled", [Pure,
       DefaultValuedAttr<BoolAttr, "true">:$rhs_k_pack
     );
 
-    let results = (outs TT_FloatTensor:$d);
+    let results = (outs TT_FpIntTensor:$d);
 
     let assemblyFormat = [{
       $a (`scale` $a_scale^)? `,` $b (`scale` $b_scale^)? `,` $c

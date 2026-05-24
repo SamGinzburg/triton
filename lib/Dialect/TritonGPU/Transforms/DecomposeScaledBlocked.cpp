@@ -29,6 +29,9 @@ DecomposeScaledBlocked::matchAndRewrite(DotScaledOp scaledDotOp,
   if (isa_and_nonnull<MmaEncodingTrait>(
           scaledDotOp.getResult().getType().getEncoding()))
     return failure();
+  if (scaledDotOp.getAElemType() == ScaleDotElemType::INT4 ||
+      scaledDotOp.getBElemType() == ScaleDotElemType::INT4)
+    return failure();
 
   // Types
   auto computeType = getComputeType(scaledDotOp.getAElemType(),
