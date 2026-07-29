@@ -93,12 +93,13 @@ Value genI32TiledOp(RewriterBase &rewriter, Generator genCall, Value argToSplit,
   return b.bitcast(vec, ty);
 }
 
-Value genPrefixSum(RewriterBase &rewriter, Value v0) {
+Value genPrefixSum(RewriterBase &rewriter, Value v0, int waveSize) {
   auto loc = v0.getLoc();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
 
   auto v0Ty = v0.getType();
   assert(v0Ty.getIntOrFloatBitWidth() == i32_ty.getIntOrFloatBitWidth());
+  assert((waveSize == 32 || waveSize == 64) && "unsupported wave size");
 
   Value v1 = v0;
   // v_add_f32 v1, v0, v0 row_shr:1 bound_ctrl:0
@@ -125,9 +126,11 @@ Value genPrefixSum(RewriterBase &rewriter, Value v0) {
   tmp = generateI32DppMove(rewriter, v1, 0x142, 0xA, 0xF, true);
   v1 = b.add(v1, tmp);
 
-  // v_add_f32 v1, v1, v1 row_bcast:31 row_mask:0xc
-  tmp = generateI32DppMove(rewriter, v1, 0x143, 0xC, 0xF, true);
-  v1 = b.add(v1, tmp);
+  if (waveSize == 64) {
+    // v_add_f32 v1, v1, v1 row_bcast:31 row_mask:0xc
+    tmp = generateI32DppMove(rewriter, v1, 0x143, 0xC, 0xF, true);
+    v1 = b.add(v1, tmp);
+  }
 
   return v1;
 }
@@ -142,6 +145,24 @@ Value AtomicRMWEmitter::emitAtomicRMW(RewriterBase &rewriter, Value rmwPtr,
   auto loc = rmwPtr.getLoc();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   Type retType = valElem.getType();
+
+  if (enableIntraWaveReduce) {
+    assert(!sharedMemBase &&
+           "intra-wave reduction requires an unused atomic result");
+    Value key = b.ptrtoint(i64_ty, rmwPtr);
+    int64_t adjacentKeyStride = retType.getIntOrFloatBitWidth() / 8;
+    auto emitGlobalAtomic = [&](RewriterBase &callbackRewriter, Value atomKey,
+                                Value operand) -> Value {
+      auto callbackBuilder = TritonLLVMOpBuilder(loc, callbackRewriter);
+      Value atomPtr = callbackBuilder.inttoptr(rmwPtr.getType(), atomKey);
+      return LLVM::AtomicRMWOp::create(callbackRewriter, loc, binOp, atomPtr,
+                                       operand, memOrder, scopeStr.c_str())
+          .getResult();
+    };
+    return emitIntraWaveReducedAtomic(rewriter, key, valElem, rmwMask,
+                                      adjacentKeyStride, emitGlobalAtomic);
+  }
+
   Value undefVal = b.undef(retType);
   // Build blocks to bypass the atomic instruction for ~rmwMask.
   auto *curBlock = rewriter.getInsertionBlock();
@@ -152,49 +173,13 @@ Value AtomicRMWEmitter::emitAtomicRMW(RewriterBase &rewriter, Value rmwPtr,
 
   rewriter.setInsertionPointToEnd(curBlock);
 
-  // intraWave reduce optimization for atomic ops needs all active threads
-  // at the beginning of a wave. This is achieved as:
-  // 1. Compute the prefix sum of the mask, then each active lane gets a
-  //    different value (offset) from its previous lane.
-  // 2. Multiply the mask and the offset, so only active lanes have a
-  //    non-zero offset, and the offset is different in each active lane
-  // 3. Sub 1 from offset to get the idx each active lane is moved to
-  // 4. Call ds_permute to move active lanes to the beginning of a wave
-  // 5. Update mask of each lane
-  if (enableIntraWaveReduce) {
-    Value maskI32 = b.zext(i32_ty, rmwMask);
-    Value offset = genPrefixSum(rewriter, maskI32);
-    offset = b.mul(offset, maskI32);
-    Value waveSize =
-        b.i32_val(mlir::triton::gpu::lookupThreadsPerWarp(rewriter));
-    offset = b.select(b.icmp_eq(offset, b.i32_val(0)), waveSize, offset);
-    Value idx = b.sub(offset, b.i32_val(1));
-    idx = b.mul(idx, b.i32_val(4));
-    valElem = genI32TiledOp(rewriter, genPermute, valElem, idx);
-    Value castedAddr = b.ptrtoint(i64_ty, rmwPtr);
-    castedAddr = genI32TiledOp(rewriter, genPermute, castedAddr, idx);
-    rmwPtr = b.inttoptr(rmwPtr.getType(), castedAddr);
-
-    // update mask
-    Value maskFlag = targetInfo.ballot(rewriter, loc, i64_ty, rmwMask);
-    Value numActiveLanes =
-        b.trunc(i32_ty, generatePopcount64(rewriter, maskFlag));
-
-    Value laneID = b.urem(getThreadId(rewriter, loc), waveSize);
-    rmwMask = b.icmp_ult(laneID, numActiveLanes);
-  }
-
   LLVM::CondBrOp::create(rewriter, loc, rmwMask, atomicBlock, endBlock,
                          undefVal);
 
   rewriter.setInsertionPointToEnd(atomicBlock);
-  Value atom =
-      enableIntraWaveReduce
-          ? atomicIntraWaveReduce(rewriter, rmwPtr, valElem, binOp, memOrder,
-                                  scopeStr.c_str())
-          : LLVM::AtomicRMWOp::create(rewriter, loc, binOp, rmwPtr, valElem,
-                                      memOrder, scopeStr.c_str())
-                .getResult();
+  Value atom = LLVM::AtomicRMWOp::create(rewriter, loc, binOp, rmwPtr, valElem,
+                                         memOrder, scopeStr.c_str())
+                   .getResult();
 
   if (sharedMemBase.has_value()) {
     Value atomPtr = *sharedMemBase;
@@ -203,6 +188,65 @@ Value AtomicRMWEmitter::emitAtomicRMW(RewriterBase &rewriter, Value rmwPtr,
   LLVM::BrOp::create(rewriter, loc, atom, endBlock);
   rewriter.setInsertionPointToStart(endBlock);
 
+  return endBlock->getArgument(0);
+}
+
+Value AtomicRMWEmitter::emitIntraWaveReducedAtomic(
+    RewriterBase &rewriter, Value key, Value operand, Value mask,
+    int64_t adjacentKeyStride, AtomicCallback emitAtomic) const {
+  auto loc = operand.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  assert(key.getType().isInteger(64) && "grouping key must be i64");
+
+  int waveSize = mlir::triton::gpu::lookupThreadsPerWarp(rewriter);
+  assert((waveSize == 32 || waveSize == 64) && "unsupported wave size");
+  Value waveSizeVal = b.i32_val(waveSize);
+
+  // Compact active lanes to the beginning of the wave. Wave32 RDNA cannot use
+  // the cross-row DPP broadcasts used by the CDNA wave64 prefix sum, so count
+  // preceding active lanes directly from the ballot.
+  Value activeBallot = targetInfo.ballot(rewriter, loc, i64_ty, mask);
+  Value numActiveLanes =
+      b.trunc(i32_ty, generatePopcount64(rewriter, activeBallot));
+  Value compactLane;
+  if (waveSize == 32) {
+    Value maskLo = b.trunc(i32_ty, activeBallot);
+    Value activeLane = ROCDL::MbcntLoOp::create(rewriter, loc, i32_ty, maskLo,
+                                                b.i32_val(0), /*arg_attrs=*/{},
+                                                /*res_attrs=*/{});
+    compactLane = b.select(mask, activeLane, b.i32_val(waveSize - 1));
+  } else {
+    Value maskI32 = b.zext(i32_ty, mask);
+    Value inclusiveLane = genPrefixSum(rewriter, maskI32, waveSize);
+    inclusiveLane = b.mul(inclusiveLane, maskI32);
+    inclusiveLane = b.select(b.icmp_eq(inclusiveLane, b.i32_val(0)),
+                             waveSizeVal, inclusiveLane);
+    compactLane = b.sub(inclusiveLane, b.i32_val(1));
+  }
+
+  Value compactByteIndex = b.mul(compactLane, b.i32_val(4));
+  operand = genI32TiledOp(rewriter, genPermute, operand, compactByteIndex);
+  key = genI32TiledOp(rewriter, genPermute, key, compactByteIndex);
+
+  Value laneID = b.urem(getThreadId(rewriter, loc), waveSizeVal);
+  mask = b.icmp_ult(laneID, numActiveLanes);
+
+  Type retType = operand.getType();
+  Value undefVal = b.undef(retType);
+  auto *curBlock = rewriter.getInsertionBlock();
+  auto *endBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+  auto *activeBlock = rewriter.createBlock(
+      curBlock->getParent(), std::next(Region::iterator(curBlock)));
+  endBlock->addArgument({retType}, {loc});
+
+  rewriter.setInsertionPointToEnd(curBlock);
+  LLVM::CondBrOp::create(rewriter, loc, mask, activeBlock, endBlock, undefVal);
+
+  rewriter.setInsertionPointToEnd(activeBlock);
+  Value atom = atomicIntraWaveReduce(rewriter, key, operand, adjacentKeyStride,
+                                     emitAtomic);
+  LLVM::BrOp::create(rewriter, loc, atom, endBlock);
+  rewriter.setInsertionPointToStart(endBlock);
   return endBlock->getArgument(0);
 }
 
@@ -323,11 +367,10 @@ Value AtomicRMWEmitter::emitPairedAtomicForEvenTID(RewriterBase &rewriter,
                            b.urem(getThreadId(rewriter, loc), b.i32_val(2)));
 }
 
-Value AtomicRMWEmitter::atomicIntraWaveReduce(RewriterBase &rewriter,
-                                              Value rmwPtr, Value operand,
-                                              LLVM::AtomicBinOp opKind,
-                                              LLVM::AtomicOrdering memOrdering,
-                                              StringRef scope) const {
+Value AtomicRMWEmitter::atomicIntraWaveReduce(RewriterBase &rewriter, Value key,
+                                              Value operand,
+                                              int64_t adjacentKeyStride,
+                                              AtomicCallback emitAtomic) const {
   // This approach minimizes intra-warp thread contention when accessing
   // global memory pointers. It is particularly advantageous for certain ISA
   // families, such as CDNA3. The algorithm follows these steps:
@@ -348,9 +391,9 @@ Value AtomicRMWEmitter::atomicIntraWaveReduce(RewriterBase &rewriter,
   auto loc = operand.getLoc();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
   Type operandElemType = operand.getType();
-  Type origPtrType = rmwPtr.getType();
-
-  rmwPtr = b.ptrtoint(i64_ty, rmwPtr);
+  Value rmwPtr = key;
+  int waveSize = mlir::triton::gpu::lookupThreadsPerWarp(rewriter);
+  assert((waveSize == 32 || waveSize == 64) && "unsupported wave size");
 
   auto *curBlock = rewriter.getInsertionBlock();
   auto *atomicBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
@@ -362,17 +405,30 @@ Value AtomicRMWEmitter::atomicIntraWaveReduce(RewriterBase &rewriter,
   rewriter.setInsertionPointToEnd(curBlock);
 
   // check how many adjacent address are in the wave
-  Value rightNeighbourAddr = genI32TiledOp(rewriter, generateI32DppMove, rmwPtr,
-                                           0x130, 0xF, 0xF, false);
-  Value elemSize = b.i64_val(operandElemType.getIntOrFloatBitWidth() / 8);
-  Value isNeighbour = b.icmp_eq(rightNeighbourAddr, b.add(rmwPtr, elemSize));
+  Value rightNeighbourAddr;
+  Value hasRightNeighbour = b.true_val();
+  if (waveSize == 32) {
+    Value laneID = b.urem(getThreadId(rewriter, loc), b.i32_val(waveSize));
+    Value rightLaneByteIndex = b.mul(b.add(laneID, b.i32_val(1)), b.i32_val(4));
+    rightNeighbourAddr =
+        genI32TiledOp(rewriter, genBPermute, rmwPtr, rightLaneByteIndex);
+    hasRightNeighbour = b.icmp_ult(laneID, b.i32_val(waveSize - 1));
+  } else {
+    rightNeighbourAddr = genI32TiledOp(rewriter, generateI32DppMove, rmwPtr,
+                                       0x130, 0xF, 0xF, false);
+  }
+  Value keyStride = b.i64_val(adjacentKeyStride);
+  Value isNeighbour =
+      b.and_(hasRightNeighbour,
+             b.icmp_eq(rightNeighbourAddr, b.add(rmwPtr, keyStride)));
   Value neighbourFlag = targetInfo.ballot(rewriter, loc, i64_ty, isNeighbour);
   Value numNeighbours =
       b.trunc(i32_ty, generatePopcount64(rewriter, neighbourFlag));
-  // Heuristic that atomic_add is optimizated only if the number of
-  // neighbouring addresses in a wave is less than 32.
+  // Skip grouping when at least half of the wave already accesses adjacent
+  // unique keys. This preserves the previous wave64 threshold and gives
+  // wave32 a cheap path for ordinary contiguous atomics.
   // TODO: Calculate actual number of difference addresses in a wave.
-  Value optAtomic = b.icmp_ult(numNeighbours, b.i32_val(32));
+  Value optAtomic = b.icmp_ult(numNeighbours, b.i32_val(waveSize / 2));
 
   LLVM::CondBrOp::create(rewriter, loc, optAtomic, initLoop, atomicBlock,
                          ValueRange({rmwPtr, operand}));
@@ -410,10 +466,12 @@ Value AtomicRMWEmitter::atomicIntraWaveReduce(RewriterBase &rewriter,
   Value mbcntLoRes =
       ROCDL::MbcntLoOp::create(rewriter, loc, i32_ty, maskLo, b.i32_val(0),
                                /*arg_attrs=*/{}, /*res_attrs=*/{});
-  Value maskHi = b.trunc(i32_ty, b.lshr(mask, b.i64_val(32)));
-  Value idx =
-      ROCDL::MbcntHiOp::create(rewriter, loc, i32_ty, maskHi, mbcntLoRes,
-                               /*arg_attrs=*/{}, /*res_attrs=*/{});
+  Value idx = mbcntLoRes;
+  if (waveSize == 64) {
+    Value maskHi = b.trunc(i32_ty, b.lshr(mask, b.i64_val(32)));
+    idx = ROCDL::MbcntHiOp::create(rewriter, loc, i32_ty, maskHi, mbcntLoRes,
+                                   /*arg_attrs=*/{}, /*res_attrs=*/{});
+  }
   Value base = b.add(start, cnt);
   Value leader = b.icmp_eq(idx, b.i32_val(0));
   cnt = b.sub(cnt, idx);
@@ -456,7 +514,7 @@ Value AtomicRMWEmitter::atomicIntraWaveReduce(RewriterBase &rewriter,
   rewriter.setInsertionPointToEnd(partialReductionBlock);
 
   auto performOp = [&](Value res, Value v) -> Value {
-    switch (opKind) {
+    switch (binOp) {
     case LLVM::AtomicBinOp::_and:
       return b.and_(res, v);
     case LLVM::AtomicBinOp::_or:
@@ -481,7 +539,7 @@ Value AtomicRMWEmitter::atomicIntraWaveReduce(RewriterBase &rewriter,
   };
   Value acc = operand;
   // Reduce to leader thread
-  for (int i = 32; i != 0; i /= 2) {
+  for (int i = waveSize / 2; i != 0; i /= 2) {
     Value tmp = genI32TiledOp(rewriter, genBPermute, acc,
                               b.add(idxScaledForPermute, b.i32_val(i * 4)));
     acc = b.select(b.icmp_ult(b.i32_val(i), cntRes), performOp(acc, tmp), acc);
@@ -499,12 +557,9 @@ Value AtomicRMWEmitter::atomicIntraWaveReduce(RewriterBase &rewriter,
                          ValueRange({rmwPtr, afterRedBlock->getArgument(0)}),
                          endBlock, ValueRange({defaultRes}));
   rewriter.setInsertionPointToEnd(atomicBlock);
-  // Utilize global atomic only by leader threads
-  Value addr = atomicBlock->getArgument(0);
-  Value atomAddr = b.inttoptr(origPtrType, addr);
-  Value atom = LLVM::AtomicRMWOp::create(rewriter, loc, opKind, atomAddr,
-                                         atomicBlock->getArgument(1),
-                                         memOrdering, scope);
+  // Invoke the selected global/buffer atomic only in group leader threads.
+  Value atom = emitAtomic(rewriter, atomicBlock->getArgument(0),
+                          atomicBlock->getArgument(1));
   LLVM::BrOp::create(rewriter, loc, atom, endBlock);
   rewriter.setInsertionPointToStart(endBlock);
 

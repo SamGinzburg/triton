@@ -1,4 +1,5 @@
 // RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1100 --convert-builtin-func-to-llvm | FileCheck %s
+// RUN: triton-opt %s -split-input-file --allocate-shared-memory --convert-triton-amdgpu-to-llvm=gfx-arch=gfx1151 --convert-builtin-func-to-llvm | FileCheck %s --check-prefixes=CHECK,GFX1151
 
 #blocked3 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
@@ -140,5 +141,95 @@ tt.func private @fptosi_i8_signed_fallback(%arg0: tensor<128xf32, #blocked>) -> 
   // CHECK-COUNT-4: llvm.fptosi
   %0 = arith.fptosi %arg0 : tensor<128xf32, #blocked> to tensor<128xi8, #blocked>
   tt.return %0 : tensor<128xi8, #blocked>
+}
+}
+
+// -----
+
+#wave32 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+// GFX1151-LABEL: @buffer_atomic_wave_reduce_f32
+tt.func private @buffer_atomic_wave_reduce_f32(
+    %base: !tt.ptr<f32>,
+    %offsets: tensor<32xi32, #wave32> {tt.constancy = 32 : i32},
+    %values: tensor<32xf32, #wave32>,
+    %mask: tensor<32xi1, #wave32>) {
+  // GFX1151: rocdl.ballot
+  // GFX1151: rocdl.mbcnt.lo
+  // GFX1151-NOT: rocdl.mbcnt.hi
+  // GFX1151: llvm.call_intrinsic "llvm.amdgcn.ds.permute"
+  // GFX1151: llvm.call_intrinsic "llvm.amdgcn.ds.bpermute"
+  // GFX1151: llvm.call_intrinsic "llvm.amdgcn.raw.ptr.buffer.atomic.fadd"
+  %unused = amdg.buffer_atomic_rmw fadd, relaxed, gpu, %values, %base[%offsets], %mask : tensor<32xf32, #wave32>
+  tt.return
+}
+}
+
+// -----
+
+#wave32 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+// GFX1151-LABEL: @buffer_atomic_wave_reduce_i32
+tt.func private @buffer_atomic_wave_reduce_i32(
+    %base: !tt.ptr<i32>,
+    %offsets: tensor<32xi32, #wave32> {tt.constancy = 32 : i32},
+    %values: tensor<32xi32, #wave32>,
+    %mask: tensor<32xi1, #wave32>) {
+  // GFX1151: rocdl.mbcnt.lo
+  // GFX1151-NOT: rocdl.mbcnt.hi
+  // GFX1151: llvm.call_intrinsic "llvm.amdgcn.ds.bpermute"
+  // GFX1151: llvm.call_intrinsic "llvm.amdgcn.raw.ptr.buffer.atomic.add"
+  %unused = amdg.buffer_atomic_rmw add, relaxed, cta, %values, %base[%offsets], %mask : tensor<32xi32, #wave32>
+  tt.return
+}
+}
+
+// -----
+
+#wave32 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+// GFX1151-LABEL: @buffer_atomic_wave_reduce_used_fallback
+tt.func private @buffer_atomic_wave_reduce_used_fallback(
+    %base: !tt.ptr<f32>,
+    %offsets: tensor<32xi32, #wave32> {tt.constancy = 32 : i32},
+    %values: tensor<32xf32, #wave32>) -> tensor<32xf32, #wave32> {
+  // GFX1151-NOT: llvm.amdgcn.ds.bpermute
+  // GFX1151: llvm.call_intrinsic "llvm.amdgcn.raw.ptr.buffer.atomic.fadd"
+  %old = amdg.buffer_atomic_rmw fadd, relaxed, gpu, %values, %base[%offsets] : tensor<32xf32, #wave32>
+  tt.return %old : tensor<32xf32, #wave32>
+}
+}
+
+// -----
+
+#wave32 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+// GFX1151-LABEL: @buffer_atomic_wave_reduce_low_contention_fallback
+tt.func private @buffer_atomic_wave_reduce_low_contention_fallback(
+    %base: !tt.ptr<f32>,
+    %offsets: tensor<32xi32, #wave32> {tt.constancy = 4 : i32},
+    %values: tensor<32xf32, #wave32>) {
+  // GFX1151-NOT: llvm.amdgcn.ds.bpermute
+  // GFX1151: llvm.call_intrinsic "llvm.amdgcn.raw.ptr.buffer.atomic.fadd"
+  %unused = amdg.buffer_atomic_rmw fadd, relaxed, gpu, %values, %base[%offsets] : tensor<32xf32, #wave32>
+  tt.return
+}
+}
+
+// -----
+
+#wave32 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+// GFX1151-LABEL: @buffer_atomic_wave_reduce_ordering_fallback
+tt.func private @buffer_atomic_wave_reduce_ordering_fallback(
+    %base: !tt.ptr<f32>,
+    %offsets: tensor<32xi32, #wave32> {tt.constancy = 32 : i32},
+    %values: tensor<32xf32, #wave32>) {
+  // GFX1151-NOT: llvm.amdgcn.ds.bpermute
+  // GFX1151: llvm.fence syncscope("agent") release
+  // GFX1151: llvm.call_intrinsic "llvm.amdgcn.raw.ptr.buffer.atomic.fadd"
+  // GFX1151: llvm.fence syncscope("agent") acquire
+  %unused = amdg.buffer_atomic_rmw fadd, acq_rel, gpu, %values, %base[%offsets] : tensor<32xf32, #wave32>
+  tt.return
 }
 }

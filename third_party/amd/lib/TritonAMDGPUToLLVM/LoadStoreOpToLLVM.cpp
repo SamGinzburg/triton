@@ -1749,6 +1749,29 @@ struct BufferAtomicRMWOpConversion
     auto opUsers = op.getResult().getUsers();
     auto hasUsers = std::distance(opUsers.begin(), opUsers.end()) > 0;
 
+    // On RDNA3.5, aggregate compile-time repeated f32/i32 add destinations
+    // within each wave before issuing a buffer atomic. The callback-based
+    // reducer dynamically handles masks and distinct address groups, while
+    // the constancy gate keeps unique/random-address atomics on the cheap
+    // direct path.
+    bool enableIntraWaveReduce = false;
+    if (targetInfo.isRDNA35() && targetInfo.getWarpSize() == 32 && !hasUsers &&
+        vec == 1 && memOrdering == MemSemantic::RELAXED &&
+        ((atomicRmwAttr == RMWOp::FADD && valueElemTy.isF32()) ||
+         (atomicRmwAttr == RMWOp::ADD && valueElemTy.isInteger(32)))) {
+      auto offsetTy = dyn_cast<RankedTensorType>(offset.getType());
+      if (offsetTy) {
+        auto threadOrder = getThreadOrder(offsetTy);
+        enableIntraWaveReduce =
+            axisAnalysisPass.getAxisInfo(offset)->getConstancy(
+                threadOrder.front()) >= 8;
+      }
+    }
+
+    auto reduceBinOp = matchAtomicOp(atomicRmwAttr);
+    auto reduceMemOrder = getMemoryOrdering(memOrdering);
+    auto reduceScope = getAMDGPUMemScopeStr(memScope);
+
     auto freeVarMasks = getFreeVariableMasks(valueTy);
     Value threadPred = emitRedundantThreadPredicateNonNull(
         freeVarMasks, rewriter, loc, targetInfo);
@@ -1767,6 +1790,39 @@ struct BufferAtomicRMWOpConversion
       Value storeVal = packElementRangeIntoVector(
           rewriter, this->getTypeConverter(), loc, cast<VectorType>(vecTy),
           valueElems, vecStart);
+
+      if (enableIntraWaveReduce) {
+        assert(reduceBinOp && reduceMemOrder && reduceScope &&
+               "validated buffer atomic must map to LLVM atomic metadata");
+        LLVM::AMD::AtomicRMWEmitter reducer(targetInfo, *reduceBinOp,
+                                            *reduceMemOrder, *reduceScope);
+        Operation *emittedAtomic = nullptr;
+        Value key = b.zext(i64_ty, offsetElems[vecStart]);
+        Value loadVal = reducer.emitIntraWaveReducedAtomic(
+            rewriter, key, valueElems[vecStart], pred,
+            /*adjacentKeyStride=*/1,
+            [&](RewriterBase &callbackRewriter, Value reducedKey,
+                Value reducedValue) -> Value {
+              auto callbackBuilder = TritonLLVMOpBuilder(loc, callbackRewriter);
+              Value reducedOffset = callbackBuilder.trunc(i32_ty, reducedKey);
+              auto callbackVecTy = vec_ty(valueElemTy, 1);
+              Value reducedVec = callbackBuilder.undef(callbackVecTy);
+              reducedVec = callbackBuilder.insert_element(
+                  callbackVecTy, reducedVec, reducedValue,
+                  callbackBuilder.i32_val(0));
+              Value returnedVec = bufferEmitter.emitAtomicRMW(
+                  atomicRmwAttr, callbackVecTy, rsrcDesc, reducedOffset,
+                  reducedVec, callbackBuilder.true_val(),
+                  /*hasUsers=*/false);
+              emittedAtomic = returnedVec.getDefiningOp();
+              return callbackBuilder.extract_element(
+                  valueElemTy, returnedVec, callbackBuilder.i32_val(0));
+            });
+        assert(emittedAtomic && "reducer callback did not emit an atomic");
+        lastRMWOp = emittedAtomic;
+        loadedVals.push_back(loadVal);
+        continue;
+      }
 
       Value loadVal = bufferEmitter.emitAtomicRMW(
           atomicRmwAttr, vecTy, rsrcDesc, offsetElems[vecStart], storeVal, pred,

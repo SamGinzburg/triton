@@ -1579,6 +1579,95 @@ def test_gfx1151_buffer_atomic_unsupported_type_fallback(dtype, device):
     assert "global_atomic" in compiled.asm["amdgcn"]
 
 
+@pytest.mark.parametrize("dtype, mnemonic", [(torch.float32, "buffer_atomic_add_f32"),
+                                               (torch.int32, "buffer_atomic_add_u32")])
+def test_gfx1151_buffer_atomic_wave_reduce(dtype, mnemonic, device):
+    if is_interpreter() or not is_hip():
+        pytest.skip("requires gfx1151 AMDGCN code generation")
+    if triton.runtime.driver.active.get_current_target().arch != "gfx1151":
+        pytest.skip("requires gfx1151")
+
+    @triton.jit
+    def atomic_reduce(src, dst, n_elements: tl.constexpr, collision_width: tl.constexpr,
+                      sparse_mask: tl.constexpr, block_size: tl.constexpr):
+        offsets = tl.arange(0, block_size)
+        mask = offsets < n_elements
+        if sparse_mask:
+            mask &= offsets % 3 != 0
+        values = tl.load(src + offsets, mask=mask, other=0)
+        buckets = offsets // collision_width
+        tl.atomic_add(dst + buckets, values, mask=mask, sem="relaxed")
+
+    n_elements = 117
+    block_size = 256  # Includes a partial wave and entirely inactive waves.
+    src = ((torch.arange(n_elements, device=device) % 13) - 6).to(dtype)
+    for collision_width in (1, 2, 4, 8, 16, 32, 64):
+        for sparse_mask in ((False, True) if collision_width == 32 else (False, )):
+            n_buckets = triton.cdiv(n_elements, collision_width)
+            dst = torch.zeros(n_buckets, device=device, dtype=dtype)
+            compiled = atomic_reduce[(1, )](src, dst, n_elements=n_elements,
+                                             collision_width=collision_width,
+                                             sparse_mask=sparse_mask, block_size=block_size,
+                                             num_warps=8)
+
+            offsets = torch.arange(n_elements, device=device)
+            active = offsets % 3 != 0 if sparse_mask else torch.ones_like(offsets, dtype=torch.bool)
+            expected = torch.zeros_like(dst)
+            expected.index_add_(0, offsets[active] // collision_width, src[active])
+            torch.testing.assert_close(dst, expected, rtol=0, atol=0)
+
+            amdgcn = compiled.asm["amdgcn"]
+            atomic_lines = [line for line in amdgcn.splitlines() if mnemonic in line]
+            assert atomic_lines and all("glc" not in line for line in atomic_lines)
+            if collision_width < 8:
+                assert "ds_bpermute" not in amdgcn
+            else:
+                assert "ds_bpermute" in amdgcn
+
+
+@pytest.mark.parametrize("dtype, mnemonic", [(torch.float32, "buffer_atomic_add_f32"),
+                                               (torch.int32, "buffer_atomic_add_u32")])
+def test_gfx1151_buffer_atomic_wave_reduce_used_fallback(dtype, mnemonic, device):
+    if is_interpreter() or not is_hip():
+        pytest.skip("requires gfx1151 AMDGCN code generation")
+    if triton.runtime.driver.active.get_current_target().arch != "gfx1151":
+        pytest.skip("requires gfx1151")
+
+    @triton.jit
+    def atomic_used(dst, old, n_elements: tl.constexpr, collision_width: tl.constexpr,
+                    block_size: tl.constexpr):
+        offsets = tl.arange(0, block_size)
+        mask = offsets < n_elements
+        buckets = offsets // collision_width
+        prior = tl.atomic_add(dst + buckets, 1, mask=mask, sem="relaxed")
+        tl.store(old + offsets, prior, mask=mask)
+
+    n_elements = 117
+    collision_width = 32
+    dst = torch.zeros(triton.cdiv(n_elements, collision_width), device=device, dtype=dtype)
+    old = torch.empty(n_elements, device=device, dtype=dtype)
+    compiled = atomic_used[(1, )](dst, old, n_elements=n_elements,
+                                   collision_width=collision_width, block_size=128,
+                                   num_warps=4)
+
+    torch.testing.assert_close(
+        dst,
+        torch.tensor([32, 32, 32, 21], device=device, dtype=dtype),
+        rtol=0,
+        atol=0,
+    )
+    for bucket in range(dst.numel()):
+        begin = bucket * collision_width
+        end = min(begin + collision_width, n_elements)
+        expected_old = torch.arange(end - begin, device=device, dtype=dtype)
+        torch.testing.assert_close(torch.sort(old[begin:end]).values, expected_old, rtol=0, atol=0)
+
+    amdgcn = compiled.asm["amdgcn"]
+    atomic_lines = [line for line in amdgcn.splitlines() if mnemonic in line]
+    assert atomic_lines and all("glc" in line for line in atomic_lines)
+    assert "ds_bpermute" not in amdgcn
+
+
 @pytest.mark.interpreter
 @pytest.mark.parametrize("num_ctas", num_ctas_list)
 def test_atomic_rmw_predicate(num_ctas, device):

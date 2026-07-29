@@ -5,11 +5,15 @@
 
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "triton/Analysis/Utility.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 
 namespace mlir::LLVM::AMD {
 
 class AtomicRMWEmitter {
 public:
+  using AtomicCallback =
+      llvm::function_ref<Value(RewriterBase &, Value, Value)>;
+
   AtomicRMWEmitter(const mlir::triton::AMD::TargetInfo &targetInfo,
                    LLVM::AtomicBinOp binOp, LLVM::AtomicOrdering memOrder,
                    StringRef scopeStr)
@@ -22,6 +26,13 @@ public:
 
   Value emitPairedAtomicForEvenTID(RewriterBase &rewriter, Value rmwPtr,
                                    Value valElem, Value rmwMask) const;
+
+  // Group active lanes by a 64-bit address/offset key, reduce each group's
+  // operand, and invoke emitAtomic once per group leader.
+  Value emitIntraWaveReducedAtomic(RewriterBase &rewriter, Value key,
+                                   Value operand, Value mask,
+                                   int64_t adjacentKeyStride,
+                                   AtomicCallback emitAtomic) const;
   void setAtomicOrdering(LLVM::AtomicOrdering memOrder) {
     this->memOrder = memOrder;
   }
@@ -33,10 +44,9 @@ private:
   mlir::LLVM::AtomicOrdering memOrder;
   std::string scopeStr;
 
-  Value atomicIntraWaveReduce(RewriterBase &rewriter, Value rmwPtr,
-                              Value operand, LLVM::AtomicBinOp opKind,
-                              LLVM::AtomicOrdering memOrdering,
-                              StringRef scope) const;
+  Value atomicIntraWaveReduce(RewriterBase &rewriter, Value key, Value operand,
+                              int64_t adjacentKeyStride,
+                              AtomicCallback emitAtomic) const;
 };
 
 } // namespace mlir::LLVM::AMD

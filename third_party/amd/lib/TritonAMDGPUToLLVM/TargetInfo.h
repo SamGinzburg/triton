@@ -17,6 +17,7 @@ public:
   amdgpu::ISAFamily getISAFamily() const {
     return targetFeatures.getISAFamily();
   }
+  bool isRDNA35() const { return targetFeatures.isRDNA35(); }
 
   llvm::AMDGPU::GPUKind getGPUKind() const;
 
