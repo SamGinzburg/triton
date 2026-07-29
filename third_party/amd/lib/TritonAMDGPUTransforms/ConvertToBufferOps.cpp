@@ -388,11 +388,9 @@ struct ConvertTritonAtomicRMWOpToBufferAtomicRMW
     // 4. Buffer atomic RMW does not support FP8 ops
     //    easier to just check what we support
     auto checkType = getElementTypeOrSelf(op.getVal());
-    bool isSupportedType = checkType.isF16() || checkType.isBF16() ||
-                           checkType.isF32() || checkType.isF64() ||
-                           checkType.isInteger(32) || checkType.isInteger(64);
-    if (!isSupportedType) {
-      return rewriter.notifyMatchFailure(op, "RMW with unsupported type");
+    if (!targetFeatures.supportsBufferAtomicRMWType(checkType)) {
+      return rewriter.notifyMatchFailure(
+          op, "RMW type unsupported on this target");
     }
     LDBG("RMW supported type");
 

@@ -1457,6 +1457,128 @@ def test_atomic_rmw(op, dtype_x_str, mode, sem, device):
     assert f"atom.global.gpu.{sem_str}" in h.asm["ptx"]
 
 
+@pytest.mark.parametrize("src_dtype", [torch.float32, torch.bfloat16])
+def test_gfx1151_packed_int4_int8_quantization(src_dtype, device):
+    if is_interpreter() or not is_hip():
+        pytest.skip("requires gfx1151 AMDGCN code generation")
+    if triton.runtime.driver.active.get_current_target().arch != "gfx1151":
+        pytest.skip("requires gfx1151")
+
+    @triton.jit
+    def quant_u8(src, dst, n_elements: tl.constexpr, block_size: tl.constexpr):
+        offsets = tl.arange(0, block_size)
+        values = tl.load(src + offsets, mask=offsets < n_elements, other=0.0)
+        quantized = tl.extra.libdevice.rint(values.to(tl.float32))
+        quantized = tl.maximum(0.0, tl.minimum(255.0, quantized)).to(tl.uint8)
+        tl.store(dst + offsets, quantized, mask=offsets < n_elements)
+
+    @triton.jit
+    def quant_i4_packed(src, dst, n_elements: tl.constexpr, block_size: tl.constexpr):
+        byte_offsets = tl.arange(0, block_size)
+        lo_offsets = 2 * byte_offsets
+        hi_offsets = lo_offsets + 1
+        lo = tl.load(src + lo_offsets, mask=lo_offsets < n_elements, other=0.0)
+        hi = tl.load(src + hi_offsets, mask=hi_offsets < n_elements, other=0.0)
+        lo = tl.maximum(-8.0, tl.minimum(7.0, tl.extra.libdevice.rint(lo.to(tl.float32))))
+        hi = tl.maximum(-8.0, tl.minimum(7.0, tl.extra.libdevice.rint(hi.to(tl.float32))))
+        lo_nibble = tl.where(lo < 0.0, lo + 16.0, lo).to(tl.uint8)
+        hi_nibble = tl.where(hi < 0.0, hi + 16.0, hi).to(tl.uint8)
+        packed = lo_nibble | (hi_nibble << 4)
+        n_bytes = (n_elements + 1) // 2
+        tl.store(dst + byte_offsets, packed, mask=byte_offsets < n_bytes)
+
+    n_u8 = 509
+    src_u8 = torch.linspace(-4.0, 260.0, n_u8, device=device, dtype=torch.float32)
+    src_u8[:8] = torch.tensor([-3.0, -0.0, 0.49, 0.5, 1.49, 254.5, 255.0, 300.0], device=device)
+    src_u8 = src_u8.to(src_dtype)
+    dst_u8 = torch.empty(n_u8, device=device, dtype=torch.uint8)
+    compiled_u8 = quant_u8[(1, )](src_u8, dst_u8, n_elements=n_u8, block_size=512, num_warps=4)
+    expected_u8 = torch.clamp(torch.round(src_u8.float()), 0, 255).to(torch.uint8)
+    torch.testing.assert_close(dst_u8, expected_u8, rtol=0, atol=0)
+
+    n_i4 = 1019
+    src_i4 = torch.linspace(-12.0, 11.0, n_i4, device=device, dtype=torch.float32)
+    src_i4[:10] = torch.tensor([-20.0, -8.4, -8.0, -7.6, -1.0, 0.0, 1.0, 6.6, 7.0, 10.0],
+                                     device=device)
+    src_i4 = src_i4.to(src_dtype)
+    dst_i4 = torch.empty((n_i4 + 1) // 2, device=device, dtype=torch.uint8)
+    compiled_i4 = quant_i4_packed[(1, )](src_i4, dst_i4, n_elements=n_i4, block_size=512, num_warps=4)
+    expected_i4 = torch.clamp(torch.round(src_i4.float()), -8, 7).to(torch.int16) & 0xF
+    expected_i4 = torch.cat((expected_i4, torch.zeros(1, device=device, dtype=torch.int16)))
+    expected_i4 = (expected_i4[0::2] | (expected_i4[1::2] << 4)).to(torch.uint8)
+    torch.testing.assert_close(dst_i4, expected_i4, rtol=0, atol=0)
+
+    assert "v_cvt_pk_u8_f32" in compiled_u8.asm["amdgcn"]
+    assert "v_cvt_pk_u8_f32" in compiled_i4.asm["amdgcn"]
+
+
+@pytest.mark.parametrize("dtype, mnemonic", [(torch.float32, "buffer_atomic_add_f32"),
+                                               (torch.int32, "buffer_atomic_add_u32")])
+def test_gfx1151_buffer_atomic_rmw_fast_path(dtype, mnemonic, device):
+    if is_interpreter() or not is_hip():
+        pytest.skip("requires gfx1151 AMDGCN code generation")
+    if triton.runtime.driver.active.get_current_target().arch != "gfx1151":
+        pytest.skip("requires gfx1151")
+
+    @triton.jit
+    def atomic_add_used(src, dst, old, n_elements: tl.constexpr, block_size: tl.constexpr):
+        offsets = tl.arange(0, block_size)
+        mask = offsets < n_elements
+        values = tl.load(src + offsets, mask=mask, other=0)
+        prior = tl.atomic_add(dst + offsets, values, mask=mask, sem="acq_rel")
+        tl.store(old + offsets, prior, mask=mask)
+
+    @triton.jit
+    def atomic_add_unused(src, dst, n_elements: tl.constexpr, block_size: tl.constexpr):
+        offsets = tl.arange(0, block_size)
+        mask = offsets < n_elements
+        values = tl.load(src + offsets, mask=mask, other=0)
+        tl.atomic_add(dst + offsets, values, mask=mask, sem="relaxed")
+
+    n_elements = 253
+    src = torch.ones(n_elements, device=device, dtype=dtype)
+    initial = torch.arange(n_elements, device=device, dtype=dtype)
+    dst = initial.clone()
+    old = torch.empty_like(dst)
+    compiled_used = atomic_add_used[(1, )](src, dst, old, n_elements=n_elements, block_size=256, num_warps=4)
+    torch.testing.assert_close(old, initial, rtol=0, atol=0)
+    torch.testing.assert_close(dst, initial + 1, rtol=0, atol=0)
+    used_lines = [line for line in compiled_used.asm["amdgcn"].splitlines() if mnemonic in line]
+    assert used_lines and all("glc" in line for line in used_lines)
+    assert "global_atomic" not in compiled_used.asm["amdgcn"]
+
+    dst.zero_()
+    compiled_unused = atomic_add_unused[(1, )](src, dst, n_elements=n_elements, block_size=256, num_warps=4)
+    torch.testing.assert_close(dst, src, rtol=0, atol=0)
+    unused_lines = [line for line in compiled_unused.asm["amdgcn"].splitlines() if mnemonic in line]
+    assert unused_lines and all("glc" not in line for line in unused_lines)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float64])
+def test_gfx1151_buffer_atomic_unsupported_type_fallback(dtype, device):
+    if is_interpreter() or not is_hip():
+        pytest.skip("requires gfx1151 AMDGCN code generation")
+    if triton.runtime.driver.active.get_current_target().arch != "gfx1151":
+        pytest.skip("requires gfx1151")
+
+    @triton.jit
+    def atomic_add(src, dst, old, n_elements: tl.constexpr):
+        offsets = tl.arange(0, n_elements)
+        values = tl.load(src + offsets)
+        prior = tl.atomic_add(dst + offsets, values, sem="acq_rel")
+        tl.store(old + offsets, prior)
+
+    n_elements = 128
+    src = torch.ones(n_elements, device=device, dtype=dtype)
+    dst = torch.zeros(n_elements, device=device, dtype=dtype)
+    old = torch.empty_like(dst)
+    compiled = atomic_add[(1, )](src, dst, old, n_elements=n_elements, num_warps=4)
+    torch.testing.assert_close(old, torch.zeros_like(old), rtol=0, atol=0)
+    torch.testing.assert_close(dst, src, rtol=0, atol=0)
+    assert "buffer_atomic" not in compiled.asm["amdgcn"]
+    assert "global_atomic" in compiled.asm["amdgcn"]
+
+
 @pytest.mark.interpreter
 @pytest.mark.parametrize("num_ctas", num_ctas_list)
 def test_atomic_rmw_predicate(num_ctas, device):

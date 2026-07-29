@@ -54,6 +54,7 @@ public:
   bool isRDNA() const;
   bool isCDNA3() const;
   bool isCDNA4() const;
+  bool isRDNA35() const;
   bool isGFX1250() const;
 
   int getWarpSize() const;
@@ -76,6 +77,8 @@ public:
   bool supportsClusterLoadBitWidth(int bitWidth) const;
 
   bool supportsBufferAtomicRMW() const;
+  // Whether an RMW value type has buffer-atomic instructions on this target.
+  bool supportsBufferAtomicRMWType(Type elementType) const;
   bool supportsBufferAtomicFadd(Type elementType) const;
   int32_t getBufferAtomicCachePolicy(bool hasUsers) const;
 

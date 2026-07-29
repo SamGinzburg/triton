@@ -11,6 +11,7 @@
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
+#include "llvm/ADT/APFloat.h"
 #include <type_traits>
 
 using namespace mlir;
@@ -2283,6 +2284,95 @@ struct FPToSIOpConversion
   }
 };
 
+static bool isIntegralFloatConstant(Value value) {
+  auto constant = value.getDefiningOp<arith::ConstantOp>();
+  if (!constant)
+    return false;
+
+  auto isIntegral = [](const APFloat &value) {
+    if (!value.isFinite())
+      return false;
+    APFloat rounded = value;
+    return rounded.roundToIntegral(APFloat::rmTowardZero) == APFloat::opOK;
+  };
+
+  Attribute attr = constant.getValue();
+  if (auto floatAttr = dyn_cast<FloatAttr>(attr))
+    return isIntegral(floatAttr.getValue());
+  if (auto denseAttr = dyn_cast<DenseFPElementsAttr>(attr))
+    return llvm::all_of(denseAttr.getValues<APFloat>(), isIntegral);
+  return false;
+}
+
+// v_cvt_pk_u8_f32 rounds its input, whereas arith.fptoui truncates. Only use
+// it when the input is already integral, optionally through operations that
+// preserve integrality (quantization clamps, signed-nibble mapping, etc.).
+static bool isKnownIntegralFloatValue(Value value, unsigned depth = 0) {
+  if (depth > 8)
+    return false;
+  if (isIntegralFloatConstant(value))
+    return true;
+  if (auto externOp = value.getDefiningOp<triton::ExternElementwiseOp>())
+    return externOp.getSymbol() == "__triton_hip_rint";
+
+  Operation *def = value.getDefiningOp();
+  if (!def)
+    return false;
+  if (isa<arith::AddFOp, arith::SubFOp, arith::MulFOp, arith::MinNumFOp,
+          arith::MaxNumFOp, arith::MinimumFOp, arith::MaximumFOp>(def)) {
+    return llvm::all_of(def->getOperands(), [&](Value operand) {
+      return isKnownIntegralFloatValue(operand, depth + 1);
+    });
+  }
+  if (auto select = dyn_cast<arith::SelectOp>(def)) {
+    return isKnownIntegralFloatValue(select.getTrueValue(), depth + 1) &&
+           isKnownIntegralFloatValue(select.getFalseValue(), depth + 1);
+  }
+  return false;
+}
+
+// Pack four adjacent fp32-to-u8 conversions into the byte lanes of one i32.
+// LLVM lowers each intrinsic call to v_cvt_pk_u8_f32 and can preserve the
+// packed value through vector stores and the common int4 nibble-pack idiom.
+struct PackedFPToUIOpConversion
+    : ElementwiseOpConversionBase<arith::FPToUIOp,
+                                  PackedFPToUIOpConversion> {
+  using Base = ElementwiseOpConversionBase<arith::FPToUIOp,
+                                           PackedFPToUIOpConversion>;
+  using OpAdaptor = Base::OpAdaptor;
+
+  PackedFPToUIOpConversion(LLVMTypeConverter &typeConverter,
+                           ModuleAxisInfoAnalysis &axisAnalysisPass,
+                           ISAFamily isaFamily,
+                           PatternBenefit benefit = patternBenefitDefault)
+      : Base(typeConverter, axisAnalysisPass, benefit), isaFamily(isaFamily) {}
+
+  SmallVector<Value> createDestOps(arith::FPToUIOp op, OpAdaptor adaptor,
+                                   ConversionPatternRewriter &rewriter,
+                                   Type elemTy, MultipleOperandsRange operands,
+                                   Location loc) const {
+    Type inElemTy = getElementTypeOrSelf(op.getIn());
+    if (isaFamily != ISAFamily::RDNA3 || !inElemTy.isF32() ||
+        !elemTy.isInteger(8) || operands.size() < 4 ||
+        !isKnownIntegralFloatValue(op.getIn()))
+      return {};
+
+    auto b = TritonLLVMOpBuilder(loc, rewriter);
+    Value packed = b.i32_val(0);
+    for (int byte = 0; byte < 4; ++byte) {
+      packed = LLVM::createLLVMIntrinsicCallOp(
+                   rewriter, loc, "llvm.amdgcn.cvt.pk.u8.f32", i32_ty,
+                   ValueRange{operands[byte][0], b.i32_val(byte), packed})
+                   .getResult(0);
+    }
+    Value packedBytes = b.bitcast(packed, vec_ty(i8_ty, 4));
+    return unpackLLVector(loc, packedBytes, rewriter);
+  }
+
+private:
+  ISAFamily isaFamily;
+};
+
 struct ExtFOpConversion
     : ElementwiseOpConversionBase<arith::ExtFOp, ExtFOpConversion> {
   using ElementwiseOpConversionBase::ElementwiseOpConversionBase;
@@ -2602,6 +2692,9 @@ void populateElementwiseOpToLLVMPatterns(
   patterns.add<TruncFOpConversion>(typeConverter, axisInfoAnalysis,
                                    targetInfo.getISAFamily(), benefit);
   patterns.add<FPToSIOpConversion>(typeConverter, axisInfoAnalysis, benefit);
+  patterns.add<PackedFPToUIOpConversion>(
+      typeConverter, axisInfoAnalysis, targetInfo.getISAFamily(),
+      benefit.getBenefit() + 1);
   patterns.add<SIToFPOpConversion>(typeConverter, axisInfoAnalysis, benefit);
   patterns.add<FpToFpOpConversion>(typeConverter, axisInfoAnalysis,
                                    targetInfo.getISAFamily(), benefit);

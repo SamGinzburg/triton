@@ -114,6 +114,11 @@ bool TargetFeatures::isCDNA4() const {
   return getISAFamily() == ISAFamily::CDNA4;
 }
 
+bool TargetFeatures::isRDNA35() const {
+  std::optional<GfxArch> gfxArch = parseGfxArch(arch);
+  return gfxArch && gfxArch->major == 11 && gfxArch->minor == 5;
+}
+
 bool TargetFeatures::isGFX1250() const {
   return getISAFamily() == ISAFamily::GFX1250;
 }
@@ -247,12 +252,24 @@ bool TargetFeatures::supportsClusterLoadBitWidth(int bitWidth) const {
 }
 
 bool TargetFeatures::supportsBufferAtomicRMW() const {
-  return llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4,
+  return isRDNA35() ||
+         llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4,
                              ISAFamily::RDNA4, ISAFamily::GFX1250},
                             getISAFamily());
 }
 
+bool TargetFeatures::supportsBufferAtomicRMWType(Type elementType) const {
+  if (isRDNA35())
+    return elementType.isF32() || elementType.isInteger(32) ||
+           elementType.isInteger(64);
+  return elementType.isF16() || elementType.isBF16() || elementType.isF32() ||
+         elementType.isF64() || elementType.isInteger(32) ||
+         elementType.isInteger(64);
+}
+
 bool TargetFeatures::supportsBufferAtomicFadd(Type elementType) const {
+  if (isRDNA35())
+    return elementType.isF32();
   auto isaFamily = getISAFamily();
   if (isaFamily == ISAFamily::CDNA3 && elementType.isBF16())
     return false;

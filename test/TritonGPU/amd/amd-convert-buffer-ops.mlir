@@ -1,6 +1,8 @@
 // RUN: triton-opt %s -split-input-file --tritonamdgpu-convert-buffer-ops="gfx-arch=gfx942 analyze-small-tensor-ofst=true"| FileCheck %s --check-prefixes=COMMON,GFX942-ONLY,CDNA
 // RUN: triton-opt %s -split-input-file --tritonamdgpu-convert-buffer-ops="gfx-arch=gfx950 analyze-small-tensor-ofst=true"| FileCheck %s --check-prefixes=COMMON,GFX950-PLUS,CDNA
 // RUN: triton-opt %s -split-input-file --tritonamdgpu-convert-buffer-ops="gfx-arch=gfx1250 analyze-small-tensor-ofst=true"| FileCheck %s --check-prefixes=COMMON,GFX950-PLUS
+// RUN: triton-opt %s -split-input-file --tritonamdgpu-convert-buffer-ops="gfx-arch=gfx1151 analyze-small-tensor-ofst=true"| FileCheck %s --check-prefixes=COMMON,GFX1151
+// RUN: triton-opt %s -split-input-file --tritonamdgpu-convert-buffer-ops="gfx-arch=gfx1151 analyze-small-tensor-ofst=true allow-buffer-atomics=false"| FileCheck %s --check-prefix=NO-RMW
 
 #blocked0 = #ttg.blocked<{sizePerThread = [8], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
@@ -708,7 +710,91 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
     %5 = tt.addptr %4, %2 : tensor<512x!tt.ptr<bf16>, #blocked>, tensor<512xi32, #blocked>
     // GFX942-ONLY-NOT: amdg.buffer_atomic_rmw
     // GFX950-PLUS: amdg.buffer_atomic_rmw
+    // GFX1151-NOT: amdg.buffer_atomic_rmw
     %6 = tt.atomic_rmw fadd, acq_rel, gpu, %5, %cst_0, %cst : (tensor<512x!tt.ptr<bf16>, #blocked>, tensor<512xbf16, #blocked>, tensor<512xi1, #blocked>) -> tensor<512xbf16, #blocked>
+    // GFX942-ONLY: tt.atomic_rmw fadd
+    // GFX1151: tt.atomic_rmw fadd
+    tt.return
+  }
+}
+
+// -----
+
+#blocked_gfx1151 = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // GFX1151-LABEL: gfx1151_buffer_atomic_fadd_f32
+  // GFX1151: amdg.buffer_atomic_rmw fadd, acq_rel, gpu
+  // NO-RMW-LABEL: gfx1151_buffer_atomic_fadd_f32
+  // NO-RMW-NOT: amdg.buffer_atomic_rmw
+  // NO-RMW: tt.atomic_rmw fadd, acq_rel, gpu
+  tt.func @gfx1151_buffer_atomic_fadd_f32(%base: !tt.ptr<f32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %values: tensor<128xf32, #blocked_gfx1151>) {
+    %offsets = tt.make_range {start = 0 : i32, end = 128 : i32} : tensor<128xi32, #blocked_gfx1151>
+    %base_splat = tt.splat %base : !tt.ptr<f32> -> tensor<128x!tt.ptr<f32>, #blocked_gfx1151>
+    %ptrs = tt.addptr %base_splat, %offsets : tensor<128x!tt.ptr<f32>, #blocked_gfx1151>, tensor<128xi32, #blocked_gfx1151>
+    %old = tt.atomic_rmw fadd, acq_rel, gpu, %ptrs, %values : (tensor<128x!tt.ptr<f32>, #blocked_gfx1151>, tensor<128xf32, #blocked_gfx1151>) -> tensor<128xf32, #blocked_gfx1151>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked_gfx1151 = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // GFX1151-LABEL: gfx1151_buffer_atomic_add_i32
+  // GFX1151: amdg.buffer_atomic_rmw add, relaxed, cta
+  tt.func @gfx1151_buffer_atomic_add_i32(%base: !tt.ptr<i32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %values: tensor<128xi32, #blocked_gfx1151>, %mask: tensor<128xi1, #blocked_gfx1151>) {
+    %offsets = tt.make_range {start = 0 : i32, end = 128 : i32} : tensor<128xi32, #blocked_gfx1151>
+    %base_splat = tt.splat %base : !tt.ptr<i32> -> tensor<128x!tt.ptr<i32>, #blocked_gfx1151>
+    %ptrs = tt.addptr %base_splat, %offsets : tensor<128x!tt.ptr<i32>, #blocked_gfx1151>, tensor<128xi32, #blocked_gfx1151>
+    %old = tt.atomic_rmw add, relaxed, cta, %ptrs, %values, %mask : (tensor<128x!tt.ptr<i32>, #blocked_gfx1151>, tensor<128xi32, #blocked_gfx1151>, tensor<128xi1, #blocked_gfx1151>) -> tensor<128xi32, #blocked_gfx1151>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked_gfx1151 = #ttg.blocked<{sizePerThread = [2], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // GFX1151-LABEL: gfx1151_atomic_fadd_f16_fallback
+  // GFX1151-NOT: amdg.buffer_atomic_rmw
+  // GFX1151: tt.atomic_rmw fadd
+  tt.func @gfx1151_atomic_fadd_f16_fallback(%base: !tt.ptr<f16> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %values: tensor<64xf16, #blocked_gfx1151>) {
+    %offsets = tt.make_range {start = 0 : i32, end = 64 : i32} : tensor<64xi32, #blocked_gfx1151>
+    %base_splat = tt.splat %base : !tt.ptr<f16> -> tensor<64x!tt.ptr<f16>, #blocked_gfx1151>
+    %ptrs = tt.addptr %base_splat, %offsets : tensor<64x!tt.ptr<f16>, #blocked_gfx1151>, tensor<64xi32, #blocked_gfx1151>
+    %old = tt.atomic_rmw fadd, relaxed, gpu, %ptrs, %values : (tensor<64x!tt.ptr<f16>, #blocked_gfx1151>, tensor<64xf16, #blocked_gfx1151>) -> tensor<64xf16, #blocked_gfx1151>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked_gfx1151 = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // GFX1151-LABEL: gfx1151_atomic_fadd_f64_fallback
+  // GFX1151-NOT: amdg.buffer_atomic_rmw
+  // GFX1151: tt.atomic_rmw fadd
+  tt.func @gfx1151_atomic_fadd_f64_fallback(%base: !tt.ptr<f64> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %values: tensor<32xf64, #blocked_gfx1151>) {
+    %offsets = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32, #blocked_gfx1151>
+    %base_splat = tt.splat %base : !tt.ptr<f64> -> tensor<32x!tt.ptr<f64>, #blocked_gfx1151>
+    %ptrs = tt.addptr %base_splat, %offsets : tensor<32x!tt.ptr<f64>, #blocked_gfx1151>, tensor<32xi32, #blocked_gfx1151>
+    %old = tt.atomic_rmw fadd, relaxed, gpu, %ptrs, %values : (tensor<32x!tt.ptr<f64>, #blocked_gfx1151>, tensor<32xf64, #blocked_gfx1151>) -> tensor<32xf64, #blocked_gfx1151>
+    tt.return
+  }
+}
+
+// -----
+
+#blocked_gfx1151 = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // GFX1151-LABEL: gfx1151_atomic_system_scope_fallback
+  // GFX1151-NOT: amdg.buffer_atomic_rmw
+  // GFX1151: tt.atomic_rmw add, relaxed, sys
+  tt.func @gfx1151_atomic_system_scope_fallback(%base: !tt.ptr<i32> {tt.divisibility = 16 : i32, tt.pointer_range = 32 : i32}, %values: tensor<128xi32, #blocked_gfx1151>) {
+    %offsets = tt.make_range {start = 0 : i32, end = 128 : i32} : tensor<128xi32, #blocked_gfx1151>
+    %base_splat = tt.splat %base : !tt.ptr<i32> -> tensor<128x!tt.ptr<i32>, #blocked_gfx1151>
+    %ptrs = tt.addptr %base_splat, %offsets : tensor<128x!tt.ptr<i32>, #blocked_gfx1151>, tensor<128xi32, #blocked_gfx1151>
+    %old = tt.atomic_rmw add, relaxed, sys, %ptrs, %values : (tensor<128x!tt.ptr<i32>, #blocked_gfx1151>, tensor<128xi32, #blocked_gfx1151>) -> tensor<128xi32, #blocked_gfx1151>
     tt.return
   }
 }

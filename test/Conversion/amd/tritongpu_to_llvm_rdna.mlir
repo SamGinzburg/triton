@@ -71,3 +71,74 @@ tt.func private @bf16_mulf(%arg0: tensor<64xbf16, #blocked>, %arg1: tensor<64xbf
   tt.return %0 : tensor<64xbf16, #blocked>
 }
 }
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+// CHECK-LABEL: @packed_fptoui_u8
+tt.func private @packed_fptoui_u8(%arg0: tensor<128xf32, #blocked>) -> tensor<128xi8, #blocked> {
+  // CHECK-COUNT-4: llvm.call_intrinsic "llvm.amdgcn.cvt.pk.u8.f32"
+  // CHECK: llvm.bitcast {{.*}} : i32 to vector<4xi8>
+  %rounded = tt.extern_elementwise %arg0 {libname = "", libpath = "", pure = true, symbol = "__triton_hip_rint"} : (tensor<128xf32, #blocked>) -> tensor<128xf32, #blocked>
+  %0 = arith.fptoui %rounded : tensor<128xf32, #blocked> to tensor<128xi8, #blocked>
+  tt.return %0 : tensor<128xi8, #blocked>
+}
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+// CHECK-LABEL: @packed_fptoui_int4_nibbles
+tt.func private @packed_fptoui_int4_nibbles(%lo: tensor<128xf32, #blocked>, %hi: tensor<128xf32, #blocked>) -> tensor<128xi8, #blocked> {
+  // CHECK-COUNT-8: llvm.call_intrinsic "llvm.amdgcn.cvt.pk.u8.f32"
+  %lo_rounded = tt.extern_elementwise %lo {libname = "", libpath = "", pure = true, symbol = "__triton_hip_rint"} : (tensor<128xf32, #blocked>) -> tensor<128xf32, #blocked>
+  %hi_rounded = tt.extern_elementwise %hi {libname = "", libpath = "", pure = true, symbol = "__triton_hip_rint"} : (tensor<128xf32, #blocked>) -> tensor<128xf32, #blocked>
+  %lo_u8 = arith.fptoui %lo_rounded : tensor<128xf32, #blocked> to tensor<128xi8, #blocked>
+  %hi_u8 = arith.fptoui %hi_rounded : tensor<128xf32, #blocked> to tensor<128xi8, #blocked>
+  %four = arith.constant dense<4> : tensor<128xi8, #blocked>
+  %hi_shifted = arith.shli %hi_u8, %four : tensor<128xi8, #blocked>
+  %packed = arith.ori %lo_u8, %hi_shifted : tensor<128xi8, #blocked>
+  tt.return %packed : tensor<128xi8, #blocked>
+}
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+// CHECK-LABEL: @fptoui_u8_fractional_fallback
+tt.func private @fptoui_u8_fractional_fallback(%arg0: tensor<128xf32, #blocked>) -> tensor<128xi8, #blocked> {
+  // CHECK-NOT: llvm.amdgcn.cvt.pk.u8.f32
+  // CHECK-COUNT-4: llvm.fptoui
+  %0 = arith.fptoui %arg0 : tensor<128xf32, #blocked> to tensor<128xi8, #blocked>
+  tt.return %0 : tensor<128xi8, #blocked>
+}
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [2], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+// CHECK-LABEL: @fptoui_u8_short_group_fallback
+tt.func private @fptoui_u8_short_group_fallback(%arg0: tensor<64xf32, #blocked>) -> tensor<64xi8, #blocked> {
+  // CHECK-NOT: llvm.amdgcn.cvt.pk.u8.f32
+  // CHECK-COUNT-2: llvm.fptoui
+  %0 = arith.fptoui %arg0 : tensor<64xf32, #blocked> to tensor<64xi8, #blocked>
+  tt.return %0 : tensor<64xi8, #blocked>
+}
+}
+
+// -----
+
+#blocked = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+// CHECK-LABEL: @fptosi_i8_signed_fallback
+tt.func private @fptosi_i8_signed_fallback(%arg0: tensor<128xf32, #blocked>) -> tensor<128xi8, #blocked> {
+  // CHECK-NOT: llvm.amdgcn.cvt.pk.u8.f32
+  // CHECK-COUNT-4: llvm.fptosi
+  %0 = arith.fptosi %arg0 : tensor<128xf32, #blocked> to tensor<128xi8, #blocked>
+  tt.return %0 : tensor<128xi8, #blocked>
+}
+}
