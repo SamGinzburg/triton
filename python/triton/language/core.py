@@ -2447,21 +2447,25 @@ def dot_scaled(lhs, lhs_scale, lhs_format, rhs, rhs_scale, rhs_format, acc=None,
     Packed int4 operands also use this API. When both int4 scales are :code:`None`,
     pass :code:`out_dtype=tl.int32` to keep the packed integer dot result and
     accumulator in :code:`int32`. When int4 scales are provided, the result is
-    :code:`float32`; current int4 scale support expects one scale subchannel per
-    dot call, with lhs scales shaped like :code:`[M, 1]` and rhs scales shaped
-    like :code:`[N, 1]` for a 2D dot.
+    :code:`float32`. The int4 MMA primitive still accumulates in :code:`int32`;
+    Triton upcasts each full or subchannel partial accumulator to :code:`float32`
+    before applying :code:`bf16` or :code:`float32` scales. For a 2D dot, lhs
+    scales are shaped like :code:`[M, K // group_size]` and rhs scales are shaped
+    like :code:`[N, K // group_size]`; :code:`[M, 1]` and :code:`[N, 1]`
+    broadcast as per-channel scales. The current int4 path requires a power-of-two
+    number of scale subchannels and a packed K dimension divisible by that count.
 
     :param lhs: The first tensor to be multiplied.
     :type lhs: 2D tensor representing int4, fp4, fp8 or bf16 elements. Int4 and fp4 elements are packed into uint8 inputs with the first element in lower bits. Fp8 are stored as uint8 or the corresponding fp8 type.
-    :param lhs_scale: Scale factor for lhs tensor. Shape should be [M, K//group_size] when lhs is [M, K], where group_size is 32 if scales type are `e8m0`. For int4, pass ordinary numeric scales for the current packed K subchannel.
-    :type lhs_scale: e8m0 type represented as an uint8 tensor, numeric tensor for int4, or None.
+    :param lhs_scale: Scale factor for lhs tensor. Shape should be [M, K//group_size] when lhs is [M, K], where group_size is 32 if scales type are `e8m0`. For int4, pass bf16 or fp32 numeric scales.
+    :type lhs_scale: e8m0 type represented as an uint8 tensor, bf16/fp32 tensor for int4, or None.
     :param lhs_format: format of the lhs tensor. Available formats: {:code:`int4`, :code:`e2m1`, :code:`e4m3`, :code:`e5m2`, :code:`bf16`, :code:`fp16`}.
     :type lhs_format: str
     :param rhs: The second tensor to be multiplied.
     :type rhs: 2D tensor representing int4, fp4, fp8 or bf16 elements. Int4 and fp4 elements are packed into uint8 inputs with the first element in lower bits. Fp8 are stored as uint8 or the corresponding fp8 type.
     :param rhs_scale: Scale factor for rhs tensor. Shape should be [N, K//group_size] where rhs is [K, N].
                       Important: Do NOT transpose rhs_scale
-    :type rhs_scale: e8m0 type represented as an uint8 tensor, numeric tensor for int4, or None.
+    :type rhs_scale: e8m0 type represented as an uint8 tensor, bf16/fp32 tensor for int4, or None.
     :param rhs_format: format of the rhs tensor. Available formats: {:code:`int4`, :code:`e2m1`, :code:`e4m3`, :code:`e5m2`, :code:`bf16`, :code:`fp16`}.
     :type rhs_format: str
     :param acc: The accumulator tensor. If not None, the result is added to this tensor. For int4 with :code:`out_dtype=tl.int32`, this must be an int32 tensor; otherwise it must be a float32 tensor.

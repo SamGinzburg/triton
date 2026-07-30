@@ -1544,6 +1544,80 @@ class TritonSemantic(Generic[TensorTy]):
     def _int4_scale_is_none(self, scale) -> bool:
         return scale is None or (isinstance(scale, tl.constexpr) and scale.value is None)
 
+    def _validate_int4_scale_dtype(self, scale, name: str) -> None:
+        if self._int4_scale_is_none(scale):
+            return
+        scale = self.to_tensor(scale)
+        assert scale.dtype in (tl.bfloat16, tl.float32), \
+            f"int4 dot_scaled {name} must be bf16 or fp32. Got {scale.dtype}"
+
+    def _int4_scale_cols(self, scale) -> int:
+        if self._int4_scale_is_none(scale):
+            return 1
+        scale = self.to_tensor(scale)
+        if not scale.type.is_block() or scale.type.numel == 1:
+            return 1
+        shape = [tl._unwrap_if_constexpr(dim) for dim in scale.shape]
+        if len(shape) < 2:
+            return 1
+        return int(shape[-1])
+
+    def _split_int4_tensor_groups(self, value: TensorTy, split_dim: int, groups: int) -> List[TensorTy]:
+        assert groups >= 1
+        if groups == 1:
+            return [value]
+        assert groups & (groups - 1) == 0, "int4 dot_scaled subchannel count must be a power of two"
+
+        shape = [int(tl._unwrap_if_constexpr(dim)) for dim in value.shape]
+        rank = len(shape)
+        if split_dim < 0:
+            split_dim += rank
+        assert 0 <= split_dim < rank
+        split_extent = shape[split_dim]
+        assert split_extent % groups == 0, \
+            f"int4 dot_scaled split dimension {split_extent} must be divisible by scale groups {groups}"
+        group_extent = split_extent // groups
+
+        dims = list(range(rank))
+        move_split_last = [dim for dim in dims if dim != split_dim] + [split_dim]
+        grouped = self.permute(value, move_split_last) if move_split_last != dims else value
+        base_shape = [shape[dim] for dim in dims if dim != split_dim]
+        grouped = self.reshape(grouped, base_shape + [groups, group_extent], can_reorder=False)
+        grouped = self.permute(grouped, list(range(len(base_shape))) + [len(base_shape) + 1, len(base_shape)])
+
+        depth = groups.bit_length() - 1
+        grouped = self.reshape(grouped, base_shape + [group_extent] + ([2] * depth), can_reorder=False)
+
+        def split_trailing_bits(tensor: TensorTy, remaining_depth: int) -> List[TensorTy]:
+            if remaining_depth == 0:
+                return [tensor]
+            lhs, rhs = self.split(tensor)
+            return split_trailing_bits(lhs, remaining_depth - 1) + split_trailing_bits(rhs, remaining_depth - 1)
+
+        parts = split_trailing_bits(grouped, depth)
+        if split_dim == rank - 1:
+            return parts
+
+        original_without_split = [dim for dim in dims if dim != split_dim]
+        restore_order = []
+        for dim in dims:
+            if dim == split_dim:
+                restore_order.append(rank - 1)
+            else:
+                restore_order.append(original_without_split.index(dim))
+        return [self.permute(part, restore_order) for part in parts]
+
+    def _split_int4_scale_groups(self, scale, groups: int):
+        if self._int4_scale_is_none(scale):
+            return [None] * groups
+        scale = self.to_tensor(scale)
+        if groups == 1 or not scale.type.is_block() or scale.type.numel == 1 or len(scale.shape) < 2:
+            return [scale] * groups
+        scale_cols = int(tl._unwrap_if_constexpr(scale.shape[-1]))
+        if scale_cols == 1:
+            return [scale] * groups
+        return self._split_int4_tensor_groups(scale, len(scale.shape) - 1, groups)
+
     def _apply_int4_dot_scale(self, result: TensorTy, scale, is_rhs: bool) -> TensorTy:
         if self._int4_scale_is_none(scale):
             return result
@@ -1608,10 +1682,37 @@ class TritonSemantic(Generic[TensorTy]):
             return self.dot_scaled_int4_mma(lhs, rhs, acc, fast_math, lhs_k_pack, rhs_k_pack)
 
         assert out_dtype == tl.float32, "Only float32 and unscaled int32 are supported for int4 dot_scaled"
-        dot = self.dot_scaled_int4_mma(lhs, rhs, None, fast_math, lhs_k_pack, rhs_k_pack)
-        result = self.cast(dot, tl.float32)
-        result = self._apply_int4_dot_scale(result, lhs_scale, is_rhs=False)
-        result = self._apply_int4_dot_scale(result, rhs_scale, is_rhs=True)
+        self._validate_int4_scale_dtype(lhs_scale, "lhs_scale")
+        self._validate_int4_scale_dtype(rhs_scale, "rhs_scale")
+
+        lhs_scale_cols = self._int4_scale_cols(lhs_scale)
+        rhs_scale_cols = self._int4_scale_cols(rhs_scale)
+        groups = max(lhs_scale_cols, rhs_scale_cols)
+        assert lhs_scale_cols in (1, groups) and rhs_scale_cols in (1, groups), \
+            f"int4 dot_scaled lhs/rhs scale subchannel counts must match or broadcast; got {lhs_scale_cols} and {rhs_scale_cols}"
+
+        if groups == 1:
+            dot = self.dot_scaled_int4_mma(lhs, rhs, None, fast_math, lhs_k_pack, rhs_k_pack)
+            result = self.cast(dot, tl.float32)
+            result = self._apply_int4_dot_scale(result, lhs_scale, is_rhs=False)
+            result = self._apply_int4_dot_scale(result, rhs_scale, is_rhs=True)
+        else:
+            # The AMD int4 WMMA path is an unscaled i32 MMA primitive. For
+            # subchannel scales, split the packed K block, run one i32 MMA per
+            # scale group, then upcast each partial to fp32 before scaling.
+            lhs_parts = self._split_int4_tensor_groups(lhs, len(lhs.shape) - 1, groups)
+            rhs_parts = self._split_int4_tensor_groups(rhs, len(rhs.shape) - 2, groups)
+            lhs_scale_parts = self._split_int4_scale_groups(lhs_scale, groups)
+            rhs_scale_parts = self._split_int4_scale_groups(rhs_scale, groups)
+
+            result = None
+            for lhs_part, rhs_part, lhs_scale_part, rhs_scale_part in zip(
+                    lhs_parts, rhs_parts, lhs_scale_parts, rhs_scale_parts):
+                dot = self.dot_scaled_int4_mma(lhs_part, rhs_part, None, fast_math, lhs_k_pack, rhs_k_pack)
+                partial = self.cast(dot, tl.float32)
+                partial = self._apply_int4_dot_scale(partial, lhs_scale_part, is_rhs=False)
+                partial = self._apply_int4_dot_scale(partial, rhs_scale_part, is_rhs=True)
+                result = partial if result is None else self.add(result, partial, sanitize_overflow=False)
 
         if acc is not None:
             assert acc.type.shape == result.type.shape and acc.type.element_ty == out_dtype

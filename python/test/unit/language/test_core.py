@@ -3964,11 +3964,11 @@ def test_dot_int4_wmma_correctness(device):
     b_packed = ((b_odd << 4) | b_even).to(torch.uint8).contiguous()
     packed_pgm = packed_kernel[(1, )](a_packed, b_packed, c_packed, M, N, K, num_warps=4)
     np.testing.assert_equal(expected, to_numpy(c_packed))
-    a_subchannel_scale = torch.linspace(0.125, 0.375, M, device=device)
-    b_subchannel_scale = torch.linspace(0.5, 1.0, N, device=device)
-    packed_scaled_pgm = packed_scaled_kernel[(1, )](a_packed, b_packed, a_subchannel_scale, b_subchannel_scale,
+    a_per_channel_scale = torch.linspace(0.125, 0.375, M, device=device)
+    b_per_channel_scale = torch.linspace(0.5, 1.0, N, device=device)
+    packed_scaled_pgm = packed_scaled_kernel[(1, )](a_packed, b_packed, a_per_channel_scale, b_per_channel_scale,
                                                     c_packed_scaled, M, N, K, num_warps=4)
-    expected_scaled = c.float() * a_subchannel_scale[:, None] * b_subchannel_scale[None, :]
+    expected_scaled = c.float() * a_per_channel_scale[:, None] * b_per_channel_scale[None, :]
     torch.testing.assert_close(c_packed_scaled, expected_scaled, rtol=1e-5, atol=1e-3)
 
     amdgcn = pgm.asm["amdgcn"]
@@ -3991,6 +3991,171 @@ def test_dot_int4_wmma_correctness(device):
     assert "_iu8" not in amdgcn
     assert "_iu8" not in packed_amdgcn
     assert "_iu8" not in packed_scaled_amdgcn
+
+
+@pytest.mark.parametrize("scale_dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("K, SUBCHANNEL", [(64, 32), (128, 32)])
+@pytest.mark.skipif(not (is_hip_rdna3() or is_hip_rdna4()), reason="Requires RDNA WMMA IU4 support")
+def test_dot_scaled_int4_wmma_subchannel_scales(device, scale_dtype, K, SUBCHANNEL):
+    if is_interpreter():
+        pytest.skip("interpreter does not exercise AMD WMMA")
+
+    M = N = 32
+    SCALE_COLS = K // SUBCHANNEL
+
+    @triton.jit
+    def subchannel_kernel(a_ptr, b_ptr, a_scale_ptr, b_scale_ptr, acc_ptr, c_ptr, BLOCK_M: tl.constexpr,
+                          BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, SCALE_COLS: tl.constexpr):
+        BLOCK_K_PACKED: tl.constexpr = BLOCK_K // 2
+        offs_m = tl.arange(0, BLOCK_M)
+        offs_n = tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K_PACKED)
+        offs_s = tl.arange(0, SCALE_COLS)
+        a_packed = tl.load(a_ptr + offs_m[:, None] * BLOCK_K_PACKED + offs_k[None, :])
+        b_packed = tl.load(b_ptr + offs_k[:, None] * BLOCK_N + offs_n[None, :])
+        a_scale = tl.load(a_scale_ptr + offs_m[:, None] * SCALE_COLS + offs_s[None, :])
+        b_scale = tl.load(b_scale_ptr + offs_n[:, None] * SCALE_COLS + offs_s[None, :])
+        acc = tl.load(acc_ptr + offs_m[:, None] * BLOCK_N + offs_n[None, :])
+        c = tl.dot_scaled(a_packed, a_scale, "int4", b_packed, b_scale, "int4", acc)
+        tl.store(c_ptr + offs_m[:, None] * BLOCK_N + offs_n[None, :], c)
+
+    torch.manual_seed(23)
+    a = torch.randint(-8, 8, (M, K), device=device, dtype=torch.int8)
+    b = torch.randint(-8, 8, (K, N), device=device, dtype=torch.int8)
+    a_even = a[:, 0::2].to(torch.int16) & 0xF
+    a_odd = a[:, 1::2].to(torch.int16) & 0xF
+    b_even = b[0::2, :].to(torch.int16) & 0xF
+    b_odd = b[1::2, :].to(torch.int16) & 0xF
+    a_packed = ((a_odd << 4) | a_even).to(torch.uint8).contiguous()
+    b_packed = ((b_odd << 4) | b_even).to(torch.uint8).contiguous()
+
+    a_scale = torch.linspace(0.50, 1.25, M * SCALE_COLS, device=device, dtype=scale_dtype).reshape(M, SCALE_COLS)
+    b_scale = torch.linspace(1.50, 0.75, N * SCALE_COLS, device=device, dtype=scale_dtype).reshape(N, SCALE_COLS)
+    acc = torch.linspace(-0.5, 0.5, M * N, device=device).reshape(M, N)
+    c = torch.empty((M, N), dtype=torch.float32, device=device)
+
+    pgm = subchannel_kernel[(1, )](a_packed, b_packed, a_scale, b_scale, acc, c, M, N, K, SCALE_COLS,
+                                   num_warps=4)
+
+    expected = acc.clone()
+    for group in range(SCALE_COLS):
+        k0 = group * SUBCHANNEL
+        k1 = k0 + SUBCHANNEL
+        partial = torch.matmul(a[:, k0:k1].float(), b[k0:k1, :].float())
+        expected += partial * a_scale[:, group, None].float() * b_scale[None, :, group].float()
+    per_channel_wrong = torch.matmul(a.float(), b.float())
+    per_channel_wrong *= a_scale[:, 0, None].float() * b_scale[None, :, 0].float()
+
+    torch.testing.assert_close(c, expected, rtol=1e-5, atol=1e-2)
+    assert not torch.allclose(expected, per_channel_wrong, rtol=1e-5, atol=1e-2)
+    assert pgm.asm["ttir"].count("tt.dot_scaled") >= SCALE_COLS
+    assert "v_wmma_i32" in pgm.asm["amdgcn"]
+
+
+@pytest.mark.parametrize(
+    "lhs_cols,rhs_cols,lhs_none,rhs_none",
+    [(1, 2, False, False), (2, 1, False, False), (1, 2, True, False), (2, 1, False, True)],
+    ids=["lhs-per-channel", "rhs-per-channel", "lhs-none", "rhs-none"],
+)
+@pytest.mark.skipif(not (is_hip_rdna3() or is_hip_rdna4()), reason="Requires RDNA WMMA IU4 support")
+def test_dot_scaled_int4_wmma_subchannel_scale_broadcast(device, lhs_cols, rhs_cols, lhs_none, rhs_none):
+    if is_interpreter():
+        pytest.skip("interpreter does not exercise AMD WMMA")
+
+    M = N = 32
+    K = 64
+    SCALE_COLS = 2
+
+    @triton.jit
+    def broadcast_kernel(a_ptr, b_ptr, a_scale_ptr, b_scale_ptr, c_ptr, BLOCK_M: tl.constexpr,
+                         BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, LHS_COLS: tl.constexpr,
+                         RHS_COLS: tl.constexpr, LHS_NONE: tl.constexpr, RHS_NONE: tl.constexpr):
+        BLOCK_K_PACKED: tl.constexpr = BLOCK_K // 2
+        offs_m = tl.arange(0, BLOCK_M)
+        offs_n = tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K_PACKED)
+        a_packed = tl.load(a_ptr + offs_m[:, None] * BLOCK_K_PACKED + offs_k[None, :])
+        b_packed = tl.load(b_ptr + offs_k[:, None] * BLOCK_N + offs_n[None, :])
+        if LHS_NONE:
+            a_scale = None
+        else:
+            offs_lhs_scale = tl.arange(0, LHS_COLS)
+            a_scale = tl.load(a_scale_ptr + offs_m[:, None] * LHS_COLS + offs_lhs_scale[None, :])
+        if RHS_NONE:
+            b_scale = None
+        else:
+            offs_rhs_scale = tl.arange(0, RHS_COLS)
+            b_scale = tl.load(b_scale_ptr + offs_n[:, None] * RHS_COLS + offs_rhs_scale[None, :])
+        c = tl.dot_scaled(a_packed, a_scale, "int4", b_packed, b_scale, "int4")
+        tl.store(c_ptr + offs_m[:, None] * BLOCK_N + offs_n[None, :], c)
+
+    torch.manual_seed(29)
+    a = torch.randint(-8, 8, (M, K), device=device, dtype=torch.int8)
+    b = torch.randint(-8, 8, (K, N), device=device, dtype=torch.int8)
+    a_packed = (((a[:, 1::2].to(torch.int16) & 0xF) << 4) |
+                (a[:, 0::2].to(torch.int16) & 0xF)).to(torch.uint8).contiguous()
+    b_packed = (((b[1::2, :].to(torch.int16) & 0xF) << 4) |
+                (b[0::2, :].to(torch.int16) & 0xF)).to(torch.uint8).contiguous()
+    a_scale = torch.linspace(0.5, 1.0, M * lhs_cols, device=device).reshape(M, lhs_cols)
+    b_scale = torch.linspace(1.5, 0.75, N * rhs_cols, device=device).reshape(N, rhs_cols)
+    c = torch.empty((M, N), dtype=torch.float32, device=device)
+
+    pgm = broadcast_kernel[(1, )](a_packed, b_packed, a_scale, b_scale, c, M, N, K, lhs_cols, rhs_cols,
+                                   lhs_none, rhs_none, num_warps=4)
+
+    expected = torch.zeros_like(c)
+    for group in range(SCALE_COLS):
+        partial = torch.matmul(a[:, group * 32:(group + 1) * 32].float(),
+                               b[group * 32:(group + 1) * 32, :].float())
+        lhs_group_scale = 1.0 if lhs_none else a_scale[:, min(group, lhs_cols - 1), None]
+        rhs_group_scale = 1.0 if rhs_none else b_scale[None, :, min(group, rhs_cols - 1)]
+        expected += partial * lhs_group_scale * rhs_group_scale
+
+    torch.testing.assert_close(c, expected, rtol=1e-5, atol=1e-2)
+    assert pgm.asm["ttir"].count("tt.dot_scaled") >= SCALE_COLS
+    assert "v_wmma_i32" in pgm.asm["amdgcn"]
+
+
+@pytest.mark.parametrize(
+    "lhs_cols,rhs_cols,scale_dtype,error",
+    [(2, 2, torch.float16, "must be bf16 or fp32"),
+     (2, 4, torch.float32, "subchannel counts must match or broadcast")],
+    ids=["invalid-dtype", "mismatched-groups"],
+)
+@pytest.mark.skipif(not (is_hip_rdna3() or is_hip_rdna4()), reason="Requires RDNA WMMA IU4 support")
+def test_dot_scaled_int4_wmma_invalid_subchannel_scales(device, lhs_cols, rhs_cols, scale_dtype, error):
+    if is_interpreter():
+        pytest.skip("interpreter does not exercise AMD WMMA")
+
+    M = N = 32
+    K = 128
+
+    @triton.jit
+    def invalid_kernel(a_ptr, b_ptr, a_scale_ptr, b_scale_ptr, c_ptr, BLOCK_M: tl.constexpr,
+                       BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr, LHS_COLS: tl.constexpr,
+                       RHS_COLS: tl.constexpr):
+        BLOCK_K_PACKED: tl.constexpr = BLOCK_K // 2
+        offs_m = tl.arange(0, BLOCK_M)
+        offs_n = tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K_PACKED)
+        offs_lhs_scale = tl.arange(0, LHS_COLS)
+        offs_rhs_scale = tl.arange(0, RHS_COLS)
+        a_packed = tl.load(a_ptr + offs_m[:, None] * BLOCK_K_PACKED + offs_k[None, :])
+        b_packed = tl.load(b_ptr + offs_k[:, None] * BLOCK_N + offs_n[None, :])
+        a_scale = tl.load(a_scale_ptr + offs_m[:, None] * LHS_COLS + offs_lhs_scale[None, :])
+        b_scale = tl.load(b_scale_ptr + offs_n[:, None] * RHS_COLS + offs_rhs_scale[None, :])
+        c = tl.dot_scaled(a_packed, a_scale, "int4", b_packed, b_scale, "int4")
+        tl.store(c_ptr + offs_m[:, None] * BLOCK_N + offs_n[None, :], c)
+
+    a_packed = torch.zeros((M, K // 2), device=device, dtype=torch.uint8)
+    b_packed = torch.zeros((K // 2, N), device=device, dtype=torch.uint8)
+    a_scale = torch.ones((M, lhs_cols), device=device, dtype=scale_dtype)
+    b_scale = torch.ones((N, rhs_cols), device=device)
+    c = torch.empty((M, N), device=device)
+
+    with pytest.raises(triton.TritonError, match=error):
+        invalid_kernel[(1, )](a_packed, b_packed, a_scale, b_scale, c, M, N, K, lhs_cols, rhs_cols,
+                              num_warps=4)
 
 
 @pytest.mark.interpreter
