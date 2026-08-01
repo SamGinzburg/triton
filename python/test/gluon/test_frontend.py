@@ -35,6 +35,7 @@ BLACKWELL_TARGET = GPUTarget("cuda", 100, 32)
 HOPPER_TARGET = GPUTarget("cuda", 90, 32)
 AMPERE_TARGET = GPUTarget("cuda", 80, 32)
 HIP_TARGET_RDNA3 = GPUTarget("hip", "gfx1100", 32)
+HIP_TARGET_RDNA35 = GPUTarget("hip", "gfx1151", 32)
 HIP_TARGET_RDNA4 = GPUTarget("hip", "gfx1200", 32)
 HIP_TARGET_CDNA3 = GPUTarget("hip", "gfx942", 64)
 HIP_TARGET_CDNA4 = GPUTarget("hip", "gfx950", 64)
@@ -2677,6 +2678,44 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
   }
 }
 """)
+
+
+@gluon.jit
+def rdna3_buffer_load_store_kernel(x, y, valid_rows):
+    layout: ttgl.constexpr = ttgl.BlockedLayout(size_per_thread=[1, 8], threads_per_warp=[4, 8],
+                                                warps_per_cta=[8, 1], order=[1, 0])
+    offs_m = ttgl.arange(0, 64, layout=ttgl.SliceLayout(1, layout))
+    offs_n = ttgl.arange(0, 128, layout=ttgl.SliceLayout(0, layout))
+    offsets = offs_m[:, None] * 128 + offs_n[None, :]
+    mask = offs_m[:, None] < valid_rows
+    value = ttgl.amd.rdna3.buffer_load(x, offsets, mask=mask, other=0, cache='.ca')
+    ttgl.amd.rdna3.buffer_store(value, y, offsets, mask=mask, cache='.cs')
+
+
+def test_rdna3_buffer_load_store_namespace():
+    x = MockTensor(ttgl.uint8)
+    y = MockTensor(ttgl.uint8)
+    module = run_parser(rdna3_buffer_load_store_kernel, *make_args(x, y, 57, num_warps=8),
+                        target=HIP_TARGET_RDNA35)
+    ir = module.str_nodebug()
+    assert 'ttg.target = "hip:gfx1151"' in ir
+    assert '"ttg.threads-per-warp" = 32' in ir
+    assert ir.count("amdg.buffer_load") == 1
+    assert ir.count("amdg.buffer_store") == 1
+    assert "cacheModifier = ca" in ir
+    assert "cacheModifier = cs" in ir
+
+
+def test_rdna3_buffer_load_rejects_float_offsets():
+
+    @gluon.jit
+    def kernel(x):
+        layout: ttgl.constexpr = ttgl.BlockedLayout([1], [32], [4], [0])
+        offsets = ttgl.full([128], 0.0, ttgl.float32, layout)
+        ttgl.amd.rdna3.buffer_load(x, offsets)
+
+    with pytest.raises(CompilationError, match="offsets element type must be int32 or uint32"):
+        run_parser(kernel, *make_args(MockTensor(ttgl.uint8)), target=HIP_TARGET_RDNA35)
 
 
 @gluon.jit

@@ -7,4 +7,6 @@ AMD RDNA 3
     :toctree: generated
     :nosignatures:
 
+    buffer_load
+    buffer_store
     wmma

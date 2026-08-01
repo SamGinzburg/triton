@@ -1382,6 +1382,35 @@ def test_amd_wmma(M, N, K, in_dtype):
     torch.testing.assert_close(ref, triton_output)
 
 
+@pytest.mark.skipif(not is_hip_rdna3(), reason="Requires RDNA3")
+def test_rdna3_buffer_load_store_masked_rows():
+
+    @gluon.jit
+    def kernel(src, dst, valid_rows, M: ttgl.constexpr, N: ttgl.constexpr, layout: ttgl.constexpr):
+        offs_m = ttgl.arange(0, M, layout=ttgl.SliceLayout(1, layout))
+        offs_n = ttgl.arange(0, N, layout=ttgl.SliceLayout(0, layout))
+        offsets = offs_m[:, None] * N + offs_n[None, :]
+        mask = offs_m[:, None] < valid_rows
+        value = ttgl.amd.rdna3.buffer_load(src, offsets, mask=mask, other=0)
+        ttgl.amd.rdna3.buffer_store(value, dst, offsets, mask=mask)
+
+    M = 64
+    N = 128
+    valid_rows = 57
+    layout = ttgl.BlockedLayout([1, 8], [4, 8], [8, 1], [1, 0])
+    src = torch.randint(0, 256, (M, N), device="cuda", dtype=torch.uint8)
+    dst = torch.full_like(src, 0xA5)
+
+    pgm = kernel[(1, )](src, dst, valid_rows, M, N, layout, num_warps=8)
+
+    torch.testing.assert_close(dst[:valid_rows], src[:valid_rows], rtol=0, atol=0)
+    assert torch.all(dst[valid_rows:] == 0xA5)
+    amdgcn = pgm.asm["amdgcn"]
+    assert amdgcn.count("buffer_load_b64") == 4
+    assert amdgcn.count("buffer_store_b64") == 4
+    assert "buffer_store_b8" not in amdgcn
+
+
 @pytest.mark.skipif(not (is_hip_cdna3() or is_hip_cdna4()), reason="Requires CDNA3 or CDNA4")
 @pytest.mark.parametrize("M, N, K", [(32, 32, 16), (16, 16, 32)])
 @pytest.mark.parametrize("in_dtype", ['float16', 'bfloat16'])

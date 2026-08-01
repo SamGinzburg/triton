@@ -1,7 +1,8 @@
 from ..._core import builtin
 from .._ops import _wmma
+from ..cdna3 import buffer_load, buffer_store
 
-__all__ = ["wmma"]
+__all__ = ["buffer_load", "buffer_store", "wmma"]
 
 
 @builtin
