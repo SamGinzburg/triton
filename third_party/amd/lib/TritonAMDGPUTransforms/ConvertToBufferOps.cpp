@@ -577,11 +577,13 @@ struct ConvertTritonStoreToBufferStore
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       ModuleAxisInfoAnalysis &axisAnalysisPass,
-      std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_)
+      std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_,
+      bool supportsUnalignedI8Stores_)
       : mlir::OpRewritePattern<triton::StoreOp>(context),
         assumptions(assumptions), axisAnalysisPass(axisAnalysisPass),
         solver(std::move(solver)),
-        analyzeSmallTensorOfst(analyzeSmallTensorOfst_) {}
+        analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
+        supportsUnalignedI8Stores(supportsUnalignedI8Stores_) {}
 
   mlir::LogicalResult
   matchAndRewrite(triton::StoreOp op,
@@ -599,6 +601,20 @@ struct ConvertTritonStoreToBufferStore
       Value basePtr = splatOp.getSrc();
       Value maybeMask{};
       unsigned contig = getVectorSize(ptr, axisAnalysisPass);
+      Type valueElemTy = getElementTypeOrSelf(op.getValue().getType());
+      if (supportsUnalignedI8Stores && valueElemTy.isInteger(8)) {
+        // The buffer intrinsic accepts an unaligned byte offset. Recover the
+        // logical width chosen by coalescing without treating the base-pointer
+        // divisibility as a vectorization requirement.
+        auto tensorTy = cast<RankedTensorType>(ptr.getType());
+        auto order = ttg::getOrder(tensorTy);
+        auto *axisInfo = axisAnalysisPass.getAxisInfo(ptr);
+        auto contigPerThread = ttg::getContigPerThread(tensorTy);
+        unsigned logicalContig = std::min<unsigned>(
+            axisInfo->getContiguity(order[0]),
+            contigPerThread[order[0]]);
+        contig = std::max(contig, std::min(logicalContig, 8u));
+      }
       if (op.getMask() && !isSplatOneConstTensor(op.getMask())) {
         maybeMask = op.getMask();
         contig = std::min<unsigned>(
@@ -623,6 +639,7 @@ private:
   ModuleAxisInfoAnalysis &axisAnalysisPass;
   std::shared_ptr<DataFlowSolver> solver;
   bool analyzeSmallTensorOfst;
+  bool supportsUnalignedI8Stores = false;
 };
 
 } // anonymous namespace
@@ -651,10 +668,13 @@ struct TritonAMDGPUConvertToBufferOpsPass
       return signalPassFailure();
 
     AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
-    patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>,
-                 ConvertTritonStoreToBufferStore>(context, assumptions,
-                                                  axisInfoAnalysis, solver,
-                                                  this->analyzeSmallTensorOfst);
+    patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>>(
+        context, assumptions, axisInfoAnalysis, solver,
+        this->analyzeSmallTensorOfst);
+    patterns.add<ConvertTritonStoreToBufferStore>(
+        context, assumptions, axisInfoAnalysis, solver,
+        this->analyzeSmallTensorOfst,
+        llvm::StringRef(gfxArch) == "gfx1151");
     if (targetFeatures.supportsBufferLoadToLocal()) {
       patterns
           .add<ConvertTritonLoadToBufferLoad<ttg::AsyncCopyGlobalToLocalOp>>(

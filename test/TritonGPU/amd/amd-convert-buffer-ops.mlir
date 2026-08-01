@@ -4,6 +4,61 @@
 // RUN: triton-opt %s -split-input-file --tritonamdgpu-convert-buffer-ops="gfx-arch=gfx1151 analyze-small-tensor-ofst=true"| FileCheck %s --check-prefixes=COMMON,GFX1151
 // RUN: triton-opt %s -split-input-file --tritonamdgpu-convert-buffer-ops="gfx-arch=gfx1151 analyze-small-tensor-ofst=true allow-buffer-atomics=false"| FileCheck %s --check-prefix=NO-RMW
 
+// The gfx1151 buffer-store path can use a vector width derived from logical
+// contiguity even when the base pointer itself has no proven alignment.
+#i8_vec8 = #ttg.blocked<{sizePerThread = [8], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // COMMON-LABEL: unaligned_i8_store
+  tt.func @unaligned_i8_store(%arg0: !tt.ptr<i8> {tt.pointer_range = 32 : i32}) {
+    %range = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32, #i8_vec8>
+    %base = tt.splat %arg0 : !tt.ptr<i8> -> tensor<256x!tt.ptr<i8>, #i8_vec8>
+    %ptr = tt.addptr %base, %range : tensor<256x!tt.ptr<i8>, #i8_vec8>, tensor<256xi32, #i8_vec8>
+    %value = arith.constant dense<1> : tensor<256xi8, #i8_vec8>
+    // GFX1151: amdg.buffer_store {{.*}} {contiguity = 8 : i32}
+    // CDNA: amdg.buffer_store
+    // CDNA-NOT: contiguity
+    tt.store %ptr, %value : tensor<256x!tt.ptr<i8>, #i8_vec8>
+    // CDNA: tt.return
+    tt.return
+  }
+
+  // COMMON-LABEL: varying_mask_i8_store
+  tt.func @varying_mask_i8_store(%arg0: !tt.ptr<i8> {tt.pointer_range = 32 : i32}, %arg1: i32) {
+    %range = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32, #i8_vec8>
+    %base = tt.splat %arg0 : !tt.ptr<i8> -> tensor<256x!tt.ptr<i8>, #i8_vec8>
+    %ptr = tt.addptr %base, %range : tensor<256x!tt.ptr<i8>, #i8_vec8>, tensor<256xi32, #i8_vec8>
+    %limit = tt.splat %arg1 : i32 -> tensor<256xi32, #i8_vec8>
+    %mask = arith.cmpi slt, %range, %limit : tensor<256xi32, #i8_vec8>
+    %value = arith.constant dense<1> : tensor<256xi8, #i8_vec8>
+    // GFX1151: amdg.buffer_store
+    // GFX1151-NOT: contiguity
+    tt.store %ptr, %value, %mask : tensor<256x!tt.ptr<i8>, #i8_vec8>
+    // GFX1151: tt.return
+    tt.return
+  }
+}
+
+// -----
+
+#i8_fallback = #ttg.blocked<{sizePerThread = [8], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // GFX1151-LABEL: non_buffer_i8_store
+  tt.func @non_buffer_i8_store(%base_address: i64) {
+    %range = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32, #i8_fallback>
+    %range_i64 = arith.extsi %range : tensor<256xi32, #i8_fallback> to tensor<256xi64, #i8_fallback>
+    %base = tt.splat %base_address : i64 -> tensor<256xi64, #i8_fallback>
+    %address = arith.addi %base, %range_i64 : tensor<256xi64, #i8_fallback>
+    %ptr = tt.int_to_ptr %address : tensor<256xi64, #i8_fallback> -> tensor<256x!tt.ptr<i8>, #i8_fallback>
+    %value = arith.constant dense<1> : tensor<256xi8, #i8_fallback>
+    // GFX1151-NOT: amdg.buffer_store
+    // GFX1151: tt.store %{{.*}}, %{{.*}} : tensor<256x!tt.ptr<i8>, #{{.*}}>
+    tt.store %ptr, %value : tensor<256x!tt.ptr<i8>, #i8_fallback>
+    tt.return
+  }
+}
+
+// -----
+
 #blocked0 = #ttg.blocked<{sizePerThread = [8], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
   // COMMON-LABEL: simple

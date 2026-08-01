@@ -53,6 +53,78 @@ tt.func @transpose(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32},
 
 // -----
 
+#gfx1151_i8_scalar = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [8], order = [0]}>
+// CHECK: #[[$GFX1151_I8_SCALAR:.*]] = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [8], order = [0]}>
+// CHECK: #[[$GFX1151_I8_VEC:.*]] = #ttg.blocked<{sizePerThread = [8], threadsPerWarp = [32], warpsPerCTA = [8], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.target = "hip:gfx1151", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @gfx1151_unaligned_i8_store
+  tt.func public @gfx1151_unaligned_i8_store(%arg0: !tt.ptr<i8> {tt.pointer_range = 32 : i32}) {
+    %range = tt.make_range {end = 2048 : i32, start = 0 : i32} : tensor<2048xi32, #gfx1151_i8_scalar>
+    %base = tt.splat %arg0 : !tt.ptr<i8> -> tensor<2048x!tt.ptr<i8>, #gfx1151_i8_scalar>
+    %ptr = tt.addptr %base, %range : tensor<2048x!tt.ptr<i8>, #gfx1151_i8_scalar>, tensor<2048xi32, #gfx1151_i8_scalar>
+    %value = arith.constant dense<1> : tensor<2048xi8, #gfx1151_i8_scalar>
+    // CHECK: %[[PTR:.*]] = ttg.convert_layout %{{.*}} : tensor<2048x!tt.ptr<i8>, #[[$GFX1151_I8_SCALAR]]> -> tensor<2048x!tt.ptr<i8>, #[[$GFX1151_I8_VEC]]>
+    // CHECK: %[[VALUE:.*]] = ttg.convert_layout %{{.*}} : tensor<2048xi8, #[[$GFX1151_I8_SCALAR]]> -> tensor<2048xi8, #[[$GFX1151_I8_VEC]]>
+    // CHECK: tt.store %[[PTR]], %[[VALUE]] : tensor<2048x!tt.ptr<i8>, #[[$GFX1151_I8_VEC]]>
+    tt.store %ptr, %value : tensor<2048x!tt.ptr<i8>, #gfx1151_i8_scalar>
+    tt.return
+  }
+
+  // CHECK-LABEL: @gfx1151_varying_mask_i8_store
+  tt.func public @gfx1151_varying_mask_i8_store(%arg0: !tt.ptr<i8> {tt.pointer_range = 32 : i32}, %arg1: i32) {
+    %range = tt.make_range {end = 2048 : i32, start = 0 : i32} : tensor<2048xi32, #gfx1151_i8_scalar>
+    %base = tt.splat %arg0 : !tt.ptr<i8> -> tensor<2048x!tt.ptr<i8>, #gfx1151_i8_scalar>
+    %ptr = tt.addptr %base, %range : tensor<2048x!tt.ptr<i8>, #gfx1151_i8_scalar>, tensor<2048xi32, #gfx1151_i8_scalar>
+    %limit = tt.splat %arg1 : i32 -> tensor<2048xi32, #gfx1151_i8_scalar>
+    %mask = arith.cmpi slt, %range, %limit : tensor<2048xi32, #gfx1151_i8_scalar>
+    %value = arith.constant dense<1> : tensor<2048xi8, #gfx1151_i8_scalar>
+    // CHECK: ttg.convert_layout %{{.*}} : tensor<2048x!tt.ptr<i8>, #[[MASK_SCALAR:.*]]> -> tensor<2048x!tt.ptr<i8>, #[[MASK_SCALAR]]>
+    // CHECK: tt.store %{{.*}}, %{{.*}}, %{{.*}} : tensor<2048x!tt.ptr<i8>, #[[MASK_SCALAR]]>
+    tt.store %ptr, %value, %mask : tensor<2048x!tt.ptr<i8>, #gfx1151_i8_scalar>
+    tt.return
+  }
+}
+
+// -----
+
+#gfx942_i8_scalar = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [64], warpsPerCTA = [4], order = [0]}>
+// CHECK: #{{.*}} = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [64], warpsPerCTA = [4], order = [0]}>
+// CHECK-NOT: sizePerThread = [8]
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx942", "ttg.threads-per-warp" = 64 : i32} {
+  // CHECK-LABEL: @gfx942_unaligned_i8_store
+  tt.func public @gfx942_unaligned_i8_store(%arg0: !tt.ptr<i8> {tt.pointer_range = 32 : i32}) {
+    %range = tt.make_range {end = 2048 : i32, start = 0 : i32} : tensor<2048xi32, #gfx942_i8_scalar>
+    %base = tt.splat %arg0 : !tt.ptr<i8> -> tensor<2048x!tt.ptr<i8>, #gfx942_i8_scalar>
+    %ptr = tt.addptr %base, %range : tensor<2048x!tt.ptr<i8>, #gfx942_i8_scalar>, tensor<2048xi32, #gfx942_i8_scalar>
+    %value = arith.constant dense<1> : tensor<2048xi8, #gfx942_i8_scalar>
+    // CHECK: ttg.convert_layout %{{.*}} : tensor<2048x!tt.ptr<i8>, #[[GFX942_SCALAR:.*]]> -> tensor<2048x!tt.ptr<i8>, #[[GFX942_SCALAR]]>
+    // CHECK: tt.store %{{.*}}, %{{.*}} : tensor<2048x!tt.ptr<i8>, #[[GFX942_SCALAR]]>
+    tt.store %ptr, %value : tensor<2048x!tt.ptr<i8>, #gfx942_i8_scalar>
+    tt.return
+  }
+}
+
+// -----
+
+#gfx1100_i8_scalar = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+// CHECK: #[[$GFX1100_SCALAR:.*]] = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
+// CHECK-NOT: sizePerThread = [8]
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.target = "hip:gfx1100", "ttg.threads-per-warp" = 32 : i32} {
+  // CHECK-LABEL: @gfx1100_unaligned_i8_store
+  tt.func public @gfx1100_unaligned_i8_store(%arg0: !tt.ptr<i8> {tt.pointer_range = 32 : i32}) {
+    %range = tt.make_range {end = 2048 : i32, start = 0 : i32} : tensor<2048xi32, #gfx1100_i8_scalar>
+    %base = tt.splat %arg0 : !tt.ptr<i8> -> tensor<2048x!tt.ptr<i8>, #gfx1100_i8_scalar>
+    %ptr = tt.addptr %base, %range : tensor<2048x!tt.ptr<i8>, #gfx1100_i8_scalar>, tensor<2048xi32, #gfx1100_i8_scalar>
+    %value = arith.constant dense<1> : tensor<2048xi8, #gfx1100_i8_scalar>
+    // CHECK: ttg.convert_layout %{{.*}} : tensor<2048x!tt.ptr<i8>, #[[$GFX1100_SCALAR]]> -> tensor<2048x!tt.ptr<i8>, #[[$GFX1100_SCALAR]]>
+    // CHECK: tt.store %{{.*}}, %{{.*}} : tensor<2048x!tt.ptr<i8>, #[[$GFX1100_SCALAR]]>
+    tt.store %ptr, %value : tensor<2048x!tt.ptr<i8>, #gfx1100_i8_scalar>
+    tt.return
+  }
+}
+
+// -----
+
 #blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [4], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, "ttg.threads-per-warp" = 32 : i32} {
 

@@ -175,6 +175,19 @@ static unsigned getMaxElementsPerThread(Operation *op) {
   return maxElementsPerThread;
 }
 
+static bool supportsUnalignedI8StoreVectorization(Operation *op) {
+  auto store = dyn_cast<triton::StoreOp>(op);
+  if (!store)
+    return false;
+
+  auto moduleOp = op->getParentOfType<ModuleOp>();
+  auto arch = moduleOp ? getAMDArch(moduleOp) : std::nullopt;
+  if (!arch || *arch != "gfx1151")
+    return false;
+
+  return getElementTypeOrSelf(store.getValue().getType()).isInteger(8);
+}
+
 unsigned getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
                                  ModuleAxisInfoAnalysis &axisInfoAnalysis,
                                  ArrayRef<int64_t> shapePerCTA) {
@@ -189,7 +202,26 @@ unsigned getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
       std::min(valInfo.getContiguity(order[0]), shapePerCTA[order[0]]);
   unsigned alignment = std::min(maxMultiple, maxContig);
   unsigned maxElementsPerThread = getMaxElementsPerThread(op);
-  unsigned currPerThread = std::min(alignment, maxElementsPerThread);
+  unsigned currPerThread;
+  if (supportsUnalignedI8StoreVectorization(op)) {
+    // gfx1151 buffer stores support an unaligned byte offset. Preserve the
+    // logical i8 contiguity here instead of constraining the layout by the
+    // pointer base alignment. Cap the store at b64: this matches the widest
+    // profitable packed-output store currently used by the target kernels.
+    currPerThread = std::min({maxContig, maxElementsPerThread, 8u});
+    auto store = cast<triton::StoreOp>(op);
+    if (store.getMask()) {
+      // The tensor is not encoded yet, so getMaskAlignment() would use the
+      // type's default order rather than the pointer-derived memory order.
+      // Query constancy in the order selected for this access instead.
+      auto *maskInfo = axisInfoAnalysis.getAxisInfo(store.getMask());
+      unsigned maskConstancy =
+          std::max<int64_t>(maskInfo->getConstancy(order[0]), 1);
+      currPerThread = std::min(currPerThread, maskConstancy);
+    }
+  } else {
+    currPerThread = std::min(alignment, maxElementsPerThread);
+  }
   LDBG("elemNumBytes: " << elemNumBytes
                         << ", divisibility: " << maxMultipleBytes
                         << ", contig: " << valInfo.getContiguity(order[0])

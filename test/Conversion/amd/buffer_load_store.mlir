@@ -1,6 +1,22 @@
 // RUN: triton-opt %s -split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx942 | FileCheck %s
 // RUN: triton-opt %s -split-input-file --convert-triton-amdgpu-to-llvm=gfx-arch=gfx950 | FileCheck %s
 
+#i8_vec8 = #ttg.blocked<{sizePerThread = [8], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
+  // CHECK-LABEL: buffer_store_unaligned_i8_vec8
+  tt.func @buffer_store_unaligned_i8_vec8(
+      %value: tensor<256xi8, #i8_vec8>,
+      %arg0: !tt.ptr<i8>,
+      %offset: tensor<256xi32, #i8_vec8>) {
+    // The contiguity contract deliberately overrides unknown base alignment.
+    // CHECK: rocdl.raw.ptr.buffer.store {{.*}} : vector<2xi32>
+    amdg.buffer_store %value, %arg0[%offset] {contiguity = 8 : i32} : tensor<256xi8, #i8_vec8>
+    tt.return
+  }
+}
+
+// -----
+
 #blocked0 = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
     // CHECK-LABEL: buffer_load

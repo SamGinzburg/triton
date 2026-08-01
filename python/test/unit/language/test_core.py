@@ -1512,6 +1512,196 @@ def test_gfx1151_packed_int4_int8_quantization(src_dtype, device):
     assert "v_cvt_pk_u8_f32" in compiled_i4.asm["amdgcn"]
 
 
+def test_gfx1151_unaligned_i8_store_safety(device):
+    if is_interpreter() or not is_hip():
+        pytest.skip("requires gfx1151 AMDGCN code generation")
+    if triton.runtime.driver.active.get_current_target().arch != "gfx1151":
+        pytest.skip("requires gfx1151")
+
+    block = 1024
+    sentinel = 0xA5
+
+    @triton.jit(do_not_specialize=["n"], do_not_specialize_on_alignment=["out", "n"])
+    def buffer_store(out, n, MASK_GROUP: tl.constexpr, HAS_TAIL: tl.constexpr, BLOCK: tl.constexpr):
+        offsets = tl.arange(0, BLOCK)
+        values = ((offsets * 17 + 3) & 0xFF).to(tl.uint8)
+        if MASK_GROUP == 0:
+            if HAS_TAIL:
+                tl.store(out + offsets, values, mask=offsets < n)
+            else:
+                tl.store(out + offsets, values)
+        else:
+            if MASK_GROUP == -1:
+                mask = ((offsets * 13 + 5) % 17) < 9
+            else:
+                mask = ((offsets // MASK_GROUP) & 1) == 0
+            if HAS_TAIL:
+                mask &= offsets < n
+            tl.store(out + offsets, values, mask=mask)
+
+    @triton.jit(do_not_specialize=["n_cols"], do_not_specialize_on_alignment=["out", "n_cols"])
+    def column_major_store(out, n_cols, ROWS: tl.constexpr, COLS: tl.constexpr):
+        rows = tl.arange(0, ROWS)[:, None]
+        cols = tl.arange(0, COLS)[None, :]
+        offsets_2d = cols * ROWS + rows
+        values_2d = ((offsets_2d * 29 + 11) & 0xFF).to(tl.uint8)
+        tl.store(out + offsets_2d, values_2d, mask=cols < n_cols)
+
+    def page_crossing_view(alignment, dtype=torch.uint8):
+        backing = torch.full((20_000, ), sentinel, device=device, dtype=torch.uint8)
+        base = backing.data_ptr()
+        boundary = (-base) % 4096
+        if boundary < 32:
+            boundary += 4096
+        bytes_before_boundary = 16 if alignment == 0 else 16 - alignment
+        start = boundary - bytes_before_boundary
+        byte_view = backing[start:start + block]
+        view = byte_view if dtype == torch.uint8 else byte_view.view(dtype)
+        assert view.data_ptr() % 16 == alignment
+        assert view.data_ptr() // 4096 != (view.data_ptr() + block - 1) // 4096
+        return backing, view, start
+
+    def assert_exact_with_redzones(backing, start, expected):
+        expected_backing = torch.full_like(backing, sentinel)
+        expected_backing[start:start + block] = expected.view(torch.uint8)
+        torch.testing.assert_close(backing, expected_backing, rtol=0, atol=0)
+
+    def expected_mask(mask_group, n=block):
+        if mask_group == 0:
+            mask = torch.ones(block, device=device, dtype=torch.bool)
+        elif mask_group == -1:
+            mask = ((offsets * 13 + 5) % 17) < 9
+        else:
+            mask = ((offsets // mask_group) & 1) == 0
+        return mask & (offsets < n)
+
+    offsets = torch.arange(block, device=device, dtype=torch.int64)
+    values = ((offsets * 17 + 3) & 0xFF).to(torch.uint8)
+    cases = (
+        (0, False, "buffer_store_b64"),
+        (8, False, "buffer_store_b64"),
+        (4, False, "buffer_store_b32"),
+        (2, False, "buffer_store_b16"),
+        (1, False, "buffer_store_b8"),
+        (-1, False, "buffer_store_b8"),
+        (8, True, "buffer_store_b8"),
+    )
+    assemblies = {}
+    for alignment in range(16):
+        backing, out, start = page_crossing_view(alignment)
+        for mask_group, has_tail, mnemonic in cases:
+            backing.fill_(sentinel)
+            n = block - 5 if has_tail else block
+            compiled = buffer_store[(1, )](
+                out,
+                n,
+                MASK_GROUP=mask_group,
+                HAS_TAIL=has_tail,
+                BLOCK=block,
+                num_warps=4,
+            )
+            expected = torch.full_like(out, sentinel)
+            mask = expected_mask(mask_group, n)
+            expected[mask] = values[mask]
+            assert_exact_with_redzones(backing, start, expected)
+            assemblies[(mask_group, has_tail)] = compiled.asm["amdgcn"]
+            assert mnemonic in compiled.asm["amdgcn"]
+
+    assert "buffer_store_b8" not in assemblies[(0, False)]
+
+    boundary_lengths = (0, 1, 2, 3, 4, 7, 8, 9, 15, 16, 31, 32, 255, 256, 1023, 1024)
+    for alignment in (0, 1, 7, 15):
+        backing, out, start = page_crossing_view(alignment)
+        for n in boundary_lengths:
+            backing.fill_(sentinel)
+            compiled = buffer_store[(1, )](
+                out,
+                n,
+                MASK_GROUP=0,
+                HAS_TAIL=True,
+                BLOCK=block,
+                num_warps=4,
+            )
+            expected = torch.full_like(out, sentinel)
+            mask = offsets < n
+            expected[mask] = values[mask]
+            assert_exact_with_redzones(backing, start, expected)
+            assert "buffer_store_b8" in compiled.asm["amdgcn"]
+
+    signed_values = values.view(torch.int8)
+    signed_sentinel = (
+        torch.tensor(sentinel, device=device, dtype=torch.uint8).view(torch.int8).item()
+    )
+    for alignment in (0, 1, 7, 15):
+        backing, out, start = page_crossing_view(alignment, torch.int8)
+        for mask_group in (0, -1):
+            backing.fill_(sentinel)
+            compiled = buffer_store[(1, )](
+                out,
+                block,
+                MASK_GROUP=mask_group,
+                HAS_TAIL=False,
+                BLOCK=block,
+                num_warps=4,
+            )
+            expected = torch.full_like(out, signed_sentinel)
+            mask = expected_mask(mask_group)
+            expected[mask] = signed_values[mask]
+            assert_exact_with_redzones(backing, start, expected)
+            expected_mnemonic = "buffer_store_b64" if mask_group == 0 else "buffer_store_b8"
+            assert expected_mnemonic in compiled.asm["amdgcn"]
+
+    matrix_rows = 8
+    matrix_cols = block // matrix_rows
+    matrix_values = ((offsets * 29 + 11) & 0xFF).to(torch.uint8)
+    for alignment in (0, 1, 7, 15):
+        backing, out, start = page_crossing_view(alignment)
+        backing.fill_(sentinel)
+        n_cols = matrix_cols - 1
+        compiled = column_major_store[(1, )](
+            out,
+            n_cols,
+            ROWS=matrix_rows,
+            COLS=matrix_cols,
+            num_warps=4,
+        )
+        expected = torch.full_like(out, sentinel)
+        mask = (offsets // matrix_rows) < n_cols
+        expected[mask] = matrix_values[mask]
+        assert_exact_with_redzones(backing, start, expected)
+        assert "buffer_store_b64" in compiled.asm["amdgcn"]
+        assert "buffer_store_b8" not in compiled.asm["amdgcn"]
+
+    @triton.jit(do_not_specialize=["base_address", "n"])
+    def non_buffer_store(base_address, n, HAS_TAIL: tl.constexpr, BLOCK: tl.constexpr):
+        offsets = tl.arange(0, BLOCK)
+        values = ((offsets * 17 + 3) & 0xFF).to(tl.uint8)
+        addresses = base_address + offsets.to(tl.int64)
+        ptrs = addresses.to(tl.pointer_type(tl.uint8), bitcast=True)
+        if HAS_TAIL:
+            tl.store(ptrs, values, mask=offsets < n)
+        else:
+            tl.store(ptrs, values)
+
+    for alignment in (0, 1, 7, 15):
+        backing, out, start = page_crossing_view(alignment)
+        for has_tail in (False, True):
+            backing.fill_(sentinel)
+            n = block - 5 if has_tail else block
+            compiled = non_buffer_store[(1, )](
+                out.data_ptr(),
+                n,
+                HAS_TAIL=has_tail,
+                BLOCK=block,
+                num_warps=4,
+            )
+            mask = offsets < n if has_tail else torch.ones_like(offsets, dtype=torch.bool)
+            expected = torch.full_like(out, sentinel)
+            expected[mask] = values[mask]
+            assert_exact_with_redzones(backing, start, expected)
+            assert "buffer_store_" not in compiled.asm["amdgcn"]
+
+
 @pytest.mark.parametrize("dtype, mnemonic", [(torch.float32, "buffer_atomic_add_f32"),
                                                (torch.int32, "buffer_atomic_add_u32")])
 def test_gfx1151_buffer_atomic_rmw_fast_path(dtype, mnemonic, device):
