@@ -290,3 +290,21 @@ def test_opt_bool(fresh_knobs_including_libraries, monkeypatch):
     assert fresh_knobs.amd.use_block_pingpong
     monkeypatch.delenv("TRITON_HIP_USE_BLOCK_PINGPONG")
     assert fresh_knobs.amd.use_block_pingpong is None
+
+
+def test_amd_in_thread_transpose_target_defaults(fresh_knobs_including_libraries):
+    from triton.backends.amd.compiler import is_in_thread_transpose_enabled
+
+    fresh_knobs = fresh_knobs_including_libraries
+    assert fresh_knobs.amd.use_in_thread_transpose is None
+
+    assert is_in_thread_transpose_enabled("gfx942")
+    assert is_in_thread_transpose_enabled("gfx1151")
+    assert is_in_thread_transpose_enabled("gfx1201")
+    assert not is_in_thread_transpose_enabled("gfx1100")
+    assert not is_in_thread_transpose_enabled("gfx1250")
+
+    fresh_knobs.amd.use_in_thread_transpose = False
+    assert not is_in_thread_transpose_enabled("gfx1151")
+    fresh_knobs.amd.use_in_thread_transpose = True
+    assert is_in_thread_transpose_enabled("gfx1100")

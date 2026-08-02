@@ -54,6 +54,39 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
 
 // -----
 
+// Packed i8 operands for gfx1151 WMMA should use the same in-register
+// transpose path as MFMA operands, widening LDS traffic without unpacking the
+// byte lanes before tt.dot_scaled lowering.
+// CHECK-DAG: [[$WMMA_I8:#.*]] = #ttg.amd_wmma<{version = 1
+// CHECK-COUNT-2: #ttg.amd_rotating_shared<{vec = 8
+// CHECK-LABEL: inThreadTranspose_wmma_i8
+// CHECK-COUNT-2: amdg.in_thread_transpose {{.*}} : tensor<{{.*}}xi8
+// CHECK: ttg.local_load {{.*}} -> tensor<256x32xi8, #ttg.dot_op<{opIdx = 0, parent = [[$WMMA_I8]], kWidth = 8}>>
+// CHECK: ttg.local_load {{.*}} -> tensor<32x128xi8, #ttg.dot_op<{opIdx = 1, parent = [[$WMMA_I8]], kWidth = 8}>>
+// CHECK: tt.dot_scaled {{.*}} lhs = int4 rhs = int4
+#blocked_a = #ttg.blocked<{sizePerThread = [8, 1], threadsPerWarp = [8, 4], warpsPerCTA = [8, 1], order = [0, 1]}>
+#blocked_b = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [4, 8], warpsPerCTA = [1, 8], order = [1, 0]}>
+#shared = #ttg.swizzled_shared<{vec = 4, perPhase = 2, maxPhase = 4, order = [0, 1]}>
+#smem = #ttg.shared_memory
+#wmma = #ttg.amd_wmma<{version = 1, isTranspose = true, ctaLayout = {warp = [[0, 1], [0, 2], [1, 0]]}}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.target = "hip:gfx1151", "ttg.threads-per-warp" = 32 : i32} {
+  tt.func public @inThreadTranspose_wmma_i8(%arg0: !tt.ptr<i8>, %arg1: !tt.ptr<i8>) {
+    %a_ptrs = tt.splat %arg0 : !tt.ptr<i8> -> tensor<256x32x!tt.ptr<i8>, #blocked_a>
+    %b_ptrs = tt.splat %arg1 : !tt.ptr<i8> -> tensor<32x128x!tt.ptr<i8>, #blocked_b>
+    %a = tt.load %a_ptrs : tensor<256x32x!tt.ptr<i8>, #blocked_a>
+    %b = tt.load %b_ptrs : tensor<32x128x!tt.ptr<i8>, #blocked_b>
+    %a_smem = ttg.local_alloc %a : (tensor<256x32xi8, #blocked_a>) -> !ttg.memdesc<256x32xi8, #shared, #smem>
+    %b_smem = ttg.local_alloc %b : (tensor<32x128xi8, #blocked_b>) -> !ttg.memdesc<32x128xi8, #shared, #smem>
+    %a_dot = ttg.local_load %a_smem : !ttg.memdesc<256x32xi8, #shared, #smem> -> tensor<256x32xi8, #ttg.dot_op<{opIdx = 0, parent = #wmma, kWidth = 8}>>
+    %b_dot = ttg.local_load %b_smem : !ttg.memdesc<32x128xi8, #shared, #smem> -> tensor<32x128xi8, #ttg.dot_op<{opIdx = 1, parent = #wmma, kWidth = 8}>>
+    %acc = arith.constant dense<0> : tensor<256x128xi32, #wmma>
+    %dot = tt.dot_scaled %a_dot, %b_dot, %acc lhs = int4 rhs = int4 {fastMath = false} : tensor<256x32xi8, #ttg.dot_op<{opIdx = 0, parent = #wmma, kWidth = 8}>> * tensor<32x128xi8, #ttg.dot_op<{opIdx = 1, parent = #wmma, kWidth = 8}>> -> tensor<256x128xi32, #wmma>
+    tt.return
+  }
+}
+
+// -----
+
 #blocked = #ttg.blocked<{sizePerThread = [1, 8], threadsPerWarp = [16, 4], warpsPerCTA = [8, 1], order = [1, 0]}>
 #blocked1 = #ttg.blocked<{sizePerThread = [8, 1], threadsPerWarp = [4, 16], warpsPerCTA = [1, 8], order = [0, 1]}>
 #shared = #ttg.swizzled_shared<{vec = 4, perPhase = 2, maxPhase = 4, order = [0, 1]}>

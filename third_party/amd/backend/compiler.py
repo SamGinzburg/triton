@@ -25,7 +25,7 @@ def is_pingpong_schedule_enabled(arch, use_async_copy):
 
 
 def is_in_thread_transpose_enabled(arch):
-    return (arch == "gfx942" or "gfx120" in arch) \
+    return (arch in ("gfx942", "gfx1151") or "gfx120" in arch) \
         if knobs.amd.use_in_thread_transpose is None else knobs.amd.use_in_thread_transpose
 
 
