@@ -494,6 +494,17 @@ private:
 // (https://cplusplus.github.io/CWG/issues/2518.html)
 template <typename T> struct always_false : std::false_type {};
 
+static unsigned getUnalignedI8Contiguity(
+    Value ptr, ModuleAxisInfoAnalysis &axisAnalysisPass, unsigned cap) {
+  auto tensorTy = cast<RankedTensorType>(ptr.getType());
+  auto order = ttg::getOrder(tensorTy);
+  auto *axisInfo = axisAnalysisPass.getAxisInfo(ptr);
+  auto contigPerThread = ttg::getContigPerThread(tensorTy);
+  unsigned axisContig =
+      static_cast<unsigned>(axisInfo->getContiguity(order[0]));
+  return std::min({axisContig, contigPerThread[order[0]], cap});
+}
+
 template <typename SourceOp>
 struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
   using OpRewritePattern<SourceOp>::OpRewritePattern;
@@ -502,10 +513,12 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       mlir::MLIRContext *context,
       DenseMap<Value, SetVector<Operation *>> &assumptions,
       ModuleAxisInfoAnalysis &axisAnalysisPass,
-      std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_)
+      std::shared_ptr<DataFlowSolver> solver, bool analyzeSmallTensorOfst_,
+      bool supportsUnalignedI8Loads_)
       : mlir::OpRewritePattern<SourceOp>(context), assumptions(assumptions),
         axisAnalysisPass(axisAnalysisPass), solver(std::move(solver)),
-        analyzeSmallTensorOfst(analyzeSmallTensorOfst_) {}
+        analyzeSmallTensorOfst(analyzeSmallTensorOfst_),
+        supportsUnalignedI8Loads(supportsUnalignedI8Loads_) {}
   mlir::LogicalResult
   matchAndRewrite(SourceOp op, PatternRewriter &rewriter) const override {
     LDBG("Try to convert: " << op);
@@ -532,6 +545,14 @@ struct ConvertTritonLoadToBufferLoad : public mlir::OpRewritePattern<SourceOp> {
       auto bufferLoadOp = [&]() {
         if constexpr (std::is_same_v<SourceOp, triton::LoadOp>) {
           unsigned contig = getVectorSize(ptr, axisAnalysisPass);
+          Type valueElemTy = getElementTypeOrSelf(op.getType());
+          if (supportsUnalignedI8Loads && valueElemTy.isInteger(8)) {
+            // Coalescing records the safe in-thread byte-lane width in the
+            // layout. Preserve it for unaligned gfx1151 buffer loads rather
+            // than reintroducing the base-pointer alignment constraint.
+            contig = std::max(
+                contig, getUnalignedI8Contiguity(ptr, axisAnalysisPass, 16));
+          }
           if (maybeMask)
             contig = std::min<unsigned>(
                 contig, axisAnalysisPass.getMaskAlignment(maybeMask));
@@ -567,6 +588,7 @@ private:
   ModuleAxisInfoAnalysis &axisAnalysisPass;
   std::shared_ptr<DataFlowSolver> solver;
   bool analyzeSmallTensorOfst;
+  bool supportsUnalignedI8Loads = false;
 };
 
 struct ConvertTritonStoreToBufferStore
@@ -606,14 +628,8 @@ struct ConvertTritonStoreToBufferStore
         // The buffer intrinsic accepts an unaligned byte offset. Recover the
         // logical width chosen by coalescing without treating the base-pointer
         // divisibility as a vectorization requirement.
-        auto tensorTy = cast<RankedTensorType>(ptr.getType());
-        auto order = ttg::getOrder(tensorTy);
-        auto *axisInfo = axisAnalysisPass.getAxisInfo(ptr);
-        auto contigPerThread = ttg::getContigPerThread(tensorTy);
-        unsigned logicalContig = std::min<unsigned>(
-            axisInfo->getContiguity(order[0]),
-            contigPerThread[order[0]]);
-        contig = std::max(contig, std::min(logicalContig, 8u));
+        contig = std::max(
+            contig, getUnalignedI8Contiguity(ptr, axisAnalysisPass, 8));
       }
       if (op.getMask() && !isSplatOneConstTensor(op.getMask())) {
         maybeMask = op.getMask();
@@ -654,6 +670,8 @@ struct TritonAMDGPUConvertToBufferOpsPass
     RewritePatternSet patterns(context);
     ModuleOp mod = getOperation();
     TargetFeatures targetFeatures{llvm::StringRef(gfxArch)};
+    bool supportsUnalignedI8Vectorization =
+        mlir::supportsUnalignedI8BufferVectorization(gfxArch);
 
     // Collect assumptions in the function
     DenseMap<Value, SetVector<Operation *>> assumptions =
@@ -670,16 +688,18 @@ struct TritonAMDGPUConvertToBufferOpsPass
     AMD::ModuleAxisInfoAnalysis axisInfoAnalysis(mod);
     patterns.add<ConvertTritonLoadToBufferLoad<tt::LoadOp>>(
         context, assumptions, axisInfoAnalysis, solver,
-        this->analyzeSmallTensorOfst);
+        this->analyzeSmallTensorOfst,
+        supportsUnalignedI8Vectorization);
     patterns.add<ConvertTritonStoreToBufferStore>(
         context, assumptions, axisInfoAnalysis, solver,
         this->analyzeSmallTensorOfst,
-        llvm::StringRef(gfxArch) == "gfx1151");
+        supportsUnalignedI8Vectorization);
     if (targetFeatures.supportsBufferLoadToLocal()) {
       patterns
           .add<ConvertTritonLoadToBufferLoad<ttg::AsyncCopyGlobalToLocalOp>>(
               context, assumptions, axisInfoAnalysis, solver,
-              this->analyzeSmallTensorOfst);
+              this->analyzeSmallTensorOfst,
+              /*supportsUnalignedI8Loads=*/false);
     }
 
     if (this->allowBufferAtomics && targetFeatures.supportsBufferAtomicRMW())

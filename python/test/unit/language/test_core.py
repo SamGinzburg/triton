@@ -1702,6 +1702,124 @@ def test_gfx1151_unaligned_i8_store_safety(device):
             assert "buffer_store_" not in compiled.asm["amdgcn"]
 
 
+def test_gfx1151_unaligned_i8_load_safety(device):
+    if is_interpreter() or not is_hip():
+        pytest.skip("requires gfx1151 AMDGCN code generation")
+    if triton.runtime.driver.active.get_current_target().arch != "gfx1151":
+        pytest.skip("requires gfx1151")
+
+    block = 2048
+    sentinel = 0xA5
+
+    @triton.jit(do_not_specialize=["n"], do_not_specialize_on_alignment=["src", "n"])
+    def buffer_load(src, out, n, MASK_GROUP: tl.constexpr, HAS_TAIL: tl.constexpr, BLOCK: tl.constexpr):
+        offsets = tl.arange(0, BLOCK)
+        if MASK_GROUP == 0:
+            if HAS_TAIL:
+                values = tl.load(src + offsets, mask=offsets < n, other=0xA5)
+            else:
+                values = tl.load(src + offsets)
+        else:
+            if MASK_GROUP == -1:
+                mask = ((offsets * 13 + 5) % 17) < 9
+            else:
+                mask = ((offsets // MASK_GROUP) & 1) == 0
+            if HAS_TAIL:
+                mask &= offsets < n
+            values = tl.load(src + offsets, mask=mask, other=0xA5)
+        tl.store(out + offsets, values)
+
+    @triton.jit(do_not_specialize=["base_address", "n"])
+    def non_buffer_load(base_address, out, n, HAS_TAIL: tl.constexpr, BLOCK: tl.constexpr):
+        offsets = tl.arange(0, BLOCK)
+        addresses = base_address + offsets.to(tl.int64)
+        ptrs = addresses.to(tl.pointer_type(tl.uint8), bitcast=True)
+        if HAS_TAIL:
+            values = tl.load(ptrs, mask=offsets < n, other=0xA5)
+        else:
+            values = tl.load(ptrs)
+        tl.store(out + offsets, values)
+
+    def page_crossing_view(alignment, dtype=torch.uint8):
+        backing = torch.arange(20_000, device=device, dtype=torch.int64).to(torch.uint8)
+        base = backing.data_ptr()
+        boundary = (-base) % 4096
+        if boundary < 32:
+            boundary += 4096
+        bytes_before_boundary = 16 if alignment == 0 else 16 - alignment
+        start = boundary - bytes_before_boundary
+        byte_view = backing[start:start + block]
+        view = byte_view if dtype == torch.uint8 else byte_view.view(dtype)
+        assert view.data_ptr() % 16 == alignment
+        assert view.data_ptr() // 4096 != (view.data_ptr() + block - 1) // 4096
+        return view
+
+    offsets = torch.arange(block, device=device, dtype=torch.int64)
+
+    def expected(src, mask_group, n=block):
+        if mask_group == 0:
+            mask = torch.ones(block, device=device, dtype=torch.bool)
+        elif mask_group == -1:
+            mask = ((offsets * 13 + 5) % 17) < 9
+        else:
+            mask = ((offsets // mask_group) & 1) == 0
+        mask &= offsets < n
+        result = torch.full((block,), sentinel, device=device, dtype=torch.uint8)
+        result[mask] = src.view(torch.uint8)[mask]
+        return result
+
+    cases = (
+        (0, False, "buffer_load_b128"),
+        (8, False, "buffer_load_b64"),
+        (-1, False, "buffer_load_u8"),
+        (8, True, "buffer_load_u8"),
+    )
+    assemblies = {}
+    out = torch.empty(block, device=device, dtype=torch.uint8)
+    for alignment in range(16):
+        src = page_crossing_view(alignment)
+        for mask_group, has_tail, mnemonic in cases:
+            n = block - 5 if has_tail else block
+            compiled = buffer_load[(1, )](
+                src,
+                out,
+                n,
+                MASK_GROUP=mask_group,
+                HAS_TAIL=has_tail,
+                BLOCK=block,
+                num_warps=4,
+            )
+            torch.testing.assert_close(out, expected(src, mask_group, n), rtol=0, atol=0)
+            asm = compiled.asm["amdgcn"]
+            assemblies[(mask_group, has_tail)] = asm
+            load_lines = [line for line in asm.splitlines() if "load" in line]
+            assert mnemonic in asm, "\n".join(load_lines)
+
+    assert "buffer_load_u8" not in assemblies[(0, False)]
+
+    signed_src = page_crossing_view(15, torch.int8)
+    compiled = buffer_load[(1, )](
+        signed_src,
+        out,
+        block,
+        MASK_GROUP=0,
+        HAS_TAIL=False,
+        BLOCK=block,
+        num_warps=4,
+    )
+    torch.testing.assert_close(out, signed_src.view(torch.uint8), rtol=0, atol=0)
+    assert "buffer_load_b128" in compiled.asm["amdgcn"]
+
+    src = page_crossing_view(1)
+    for has_tail in (False, True):
+        n = block - 5 if has_tail else block
+        compiled = non_buffer_load[(1, )](
+            src.data_ptr(), out, n, HAS_TAIL=has_tail, BLOCK=block, num_warps=4
+        )
+        torch.testing.assert_close(out, expected(src, 0, n), rtol=0, atol=0)
+        assert "buffer_load_" not in compiled.asm["amdgcn"]
+
+
 @pytest.mark.parametrize("dtype, mnemonic", [(torch.float32, "buffer_atomic_add_f32"),
                                                (torch.int32, "buffer_atomic_add_u32")])
 def test_gfx1151_buffer_atomic_rmw_fast_path(dtype, mnemonic, device):

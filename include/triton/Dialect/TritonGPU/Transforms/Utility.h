@@ -218,6 +218,10 @@ int getNVIDIAComputeCapability(Operation *module);
 // Read the amd target from the module attributes
 std::optional<StringRef> getAMDArch(Operation *module);
 
+// Return whether this exact AMD architecture has been validated for
+// alignment-independent i8 buffer-load/store vectorization.
+bool supportsUnalignedI8BufferVectorization(StringRef arch);
+
 std::optional<mlir::triton::gpu::SwizzledSharedEncodingAttr>
 getSharedEncIfAllUsersAreDotEnc(Value val, bool &incompatible);
 

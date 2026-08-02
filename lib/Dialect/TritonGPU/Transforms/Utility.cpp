@@ -15,6 +15,7 @@
 #include "triton/Dialect/TritonGPU/IR/LinearLayoutConversions.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "ttg-utility"
@@ -175,17 +176,22 @@ static unsigned getMaxElementsPerThread(Operation *op) {
   return maxElementsPerThread;
 }
 
-static bool supportsUnalignedI8StoreVectorization(Operation *op) {
-  auto store = dyn_cast<triton::StoreOp>(op);
-  if (!store)
-    return false;
-
+static std::optional<unsigned>
+getUnalignedI8VectorizationCap(Operation *op) {
   auto moduleOp = op->getParentOfType<ModuleOp>();
   auto arch = moduleOp ? getAMDArch(moduleOp) : std::nullopt;
-  if (!arch || *arch != "gfx1151")
-    return false;
+  if (!arch || !supportsUnalignedI8BufferVectorization(*arch))
+    return std::nullopt;
 
-  return getElementTypeOrSelf(store.getValue().getType()).isInteger(8);
+  if (auto load = dyn_cast<triton::LoadOp>(op)) {
+    if (getElementTypeOrSelf(load.getType()).isInteger(8))
+      return 16;
+  }
+  if (auto store = dyn_cast<triton::StoreOp>(op)) {
+    if (getElementTypeOrSelf(store.getValue().getType()).isInteger(8))
+      return 8;
+  }
+  return std::nullopt;
 }
 
 unsigned getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
@@ -203,18 +209,22 @@ unsigned getNumElementsPerThread(Operation *op, SmallVector<unsigned> order,
   unsigned alignment = std::min(maxMultiple, maxContig);
   unsigned maxElementsPerThread = getMaxElementsPerThread(op);
   unsigned currPerThread;
-  if (supportsUnalignedI8StoreVectorization(op)) {
-    // gfx1151 buffer stores support an unaligned byte offset. Preserve the
-    // logical i8 contiguity here instead of constraining the layout by the
-    // pointer base alignment. Cap the store at b64: this matches the widest
-    // profitable packed-output store currently used by the target kernels.
-    currPerThread = std::min({maxContig, maxElementsPerThread, 8u});
-    auto store = cast<triton::StoreOp>(op);
-    if (store.getMask()) {
+  if (auto unalignedI8Cap = getUnalignedI8VectorizationCap(op)) {
+    // Validated targets support an unaligned byte offset. Preserve logical i8
+    // contiguity instead of constraining the layout by base-pointer alignment.
+    // Loads may use b128; stores retain their b64 cap.
+    currPerThread =
+        std::min({maxContig, maxElementsPerThread, *unalignedI8Cap});
+    Value mask;
+    if (auto load = dyn_cast<triton::LoadOp>(op))
+      mask = load.getMask();
+    else
+      mask = cast<triton::StoreOp>(op).getMask();
+    if (mask) {
       // The tensor is not encoded yet, so getMaskAlignment() would use the
       // type's default order rather than the pointer-derived memory order.
       // Query constancy in the order selected for this access instead.
-      auto *maskInfo = axisInfoAnalysis.getAxisInfo(store.getMask());
+      auto *maskInfo = axisInfoAnalysis.getAxisInfo(mask);
       unsigned maskConstancy =
           std::max<int64_t>(maskInfo->getConstancy(order[0]), 1);
       currPerThread = std::min(currPerThread, maskConstancy);
@@ -1132,6 +1142,23 @@ std::optional<StringRef> getAMDArch(Operation *module) {
   }
 
   return ref.drop_front(4); // drop the "hip:"
+}
+
+bool supportsUnalignedI8BufferVectorization(StringRef arch) {
+  // Keep this as an exact, validated-target allowlist rather than enabling an
+  // entire ISA family. AMD RDNA3.5 ISA section 9.5 specifies that non-formatted
+  // buffer operations permit any address alignment in
+  // SH_MEM_CONFIG.alignment_mode=UNALIGNED; section 9.1 and table 104 define
+  // BUFFER_LOAD/STORE_B64 and B128. See:
+  // https://www.amd.com/content/dam/amd/en/documents/radeon-tech-docs/instruction-set-architectures/rdna35_instruction_set_architecture.pdf
+  //
+  // Vector buffer OOB checks occur per DWORD, so callers must also restrict a
+  // vector to byte lanes with the same valid mask. See "Buffer Fat Pointer out
+  // of bounds (OOB) handling" in https://llvm.org/docs/AMDGPUUsage.html.
+  // Before adding an architecture, verify its runtime selects UNALIGNED mode
+  // and test every base alignment plus masked tails on hardware.
+  static constexpr llvm::StringLiteral validatedArchitectures[] = {"gfx1151"};
+  return llvm::is_contained(validatedArchitectures, arch);
 }
 
 static inline ttg::SwizzledSharedEncodingAttr

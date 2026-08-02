@@ -4,10 +4,38 @@
 // RUN: triton-opt %s -split-input-file --tritonamdgpu-convert-buffer-ops="gfx-arch=gfx1151 analyze-small-tensor-ofst=true"| FileCheck %s --check-prefixes=COMMON,GFX1151
 // RUN: triton-opt %s -split-input-file --tritonamdgpu-convert-buffer-ops="gfx-arch=gfx1151 analyze-small-tensor-ofst=true allow-buffer-atomics=false"| FileCheck %s --check-prefix=NO-RMW
 
-// The gfx1151 buffer-store path can use a vector width derived from logical
-// contiguity even when the base pointer itself has no proven alignment.
+// The gfx1151 buffer-load/store path can use a vector width derived from
+// logical contiguity even when the base pointer itself has no proven alignment.
+#i8_vec16 = #ttg.blocked<{sizePerThread = [16], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
 #i8_vec8 = #ttg.blocked<{sizePerThread = [8], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
 module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 32 : i32} {
+  // COMMON-LABEL: unaligned_i8_load
+  tt.func @unaligned_i8_load(%arg0: !tt.ptr<i8> {tt.pointer_range = 32 : i32}) -> tensor<512xi8, #i8_vec16> {
+    %range = tt.make_range {end = 512 : i32, start = 0 : i32} : tensor<512xi32, #i8_vec16>
+    %base = tt.splat %arg0 : !tt.ptr<i8> -> tensor<512x!tt.ptr<i8>, #i8_vec16>
+    %ptr = tt.addptr %base, %range : tensor<512x!tt.ptr<i8>, #i8_vec16>, tensor<512xi32, #i8_vec16>
+    // GFX1151: amdg.buffer_load {{.*}} {contiguity = 16 : i32}
+    // CDNA: amdg.buffer_load
+    // CDNA-NOT: contiguity
+    %value = tt.load %ptr : tensor<512x!tt.ptr<i8>, #i8_vec16>
+    // CDNA: tt.return
+    tt.return %value : tensor<512xi8, #i8_vec16>
+  }
+
+  // COMMON-LABEL: varying_mask_i8_load
+  tt.func @varying_mask_i8_load(%arg0: !tt.ptr<i8> {tt.pointer_range = 32 : i32}, %arg1: i32) -> tensor<512xi8, #i8_vec16> {
+    %range = tt.make_range {end = 512 : i32, start = 0 : i32} : tensor<512xi32, #i8_vec16>
+    %base = tt.splat %arg0 : !tt.ptr<i8> -> tensor<512x!tt.ptr<i8>, #i8_vec16>
+    %ptr = tt.addptr %base, %range : tensor<512x!tt.ptr<i8>, #i8_vec16>, tensor<512xi32, #i8_vec16>
+    %limit = tt.splat %arg1 : i32 -> tensor<512xi32, #i8_vec16>
+    %mask = arith.cmpi slt, %range, %limit : tensor<512xi32, #i8_vec16>
+    // GFX1151: amdg.buffer_load
+    // GFX1151-NOT: contiguity
+    %value = tt.load %ptr, %mask : tensor<512x!tt.ptr<i8>, #i8_vec16>
+    // GFX1151: tt.return
+    tt.return %value : tensor<512xi8, #i8_vec16>
+  }
+
   // COMMON-LABEL: unaligned_i8_store
   tt.func @unaligned_i8_store(%arg0: !tt.ptr<i8> {tt.pointer_range = 32 : i32}) {
     %range = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32, #i8_vec8>
