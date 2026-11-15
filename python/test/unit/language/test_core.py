@@ -5223,6 +5223,35 @@ def test_masked_load_shared_memory(dtype, device):
     torch.testing.assert_close(out, reference_out, atol=1e-2, rtol=0)
 
 
+@pytest.mark.skipif(not is_hip(), reason="volatile spin-wait lowering is AMD specific")
+def test_volatile_load_spin_loop_amd(device):
+
+    @triton.jit
+    def _kernel(ctr_ptr, fail_ptr, num_programs, iters, max_spins):
+        for i in range(iters):
+            tl.atomic_add(ctr_ptr, 1, sem="release", scope="gpu")
+            target = (i + 1) * num_programs
+            v = tl.load(ctr_ptr, volatile=True)
+            spins = 0
+            # The spin bound turns a hoisted (non-reloaded) load into a test failure instead of a hang.
+            while (v < target) & (spins < max_spins):
+                v = tl.load(ctr_ptr, volatile=True)
+                spins += 1
+            if v < target:
+                tl.atomic_add(fail_ptr, 1)
+
+    grid, iters = 4, 3
+    ctr = torch.zeros(1, dtype=torch.int32, device=device)
+    fail = torch.zeros(1, dtype=torch.int32, device=device)
+    compiled = _kernel[(grid, )](ctr, fail, grid, iters, 1 << 22, num_warps=1)
+    assert fail.item() == 0, "spin loop bailed out: volatile load was not re-issued"
+    assert ctr.item() == grid * iters
+    # The runtime check alone can pass by timing (all atomics land before the first load),
+    # so also require the uncached reload inside the loop in addition to the one before it.
+    volatile_loads = [line for line in compiled.asm["amdgcn"].splitlines() if "global_load" in line and "glc" in line]
+    assert len(volatile_loads) >= 2, volatile_loads
+
+
 @pytest.mark.interpreter
 @pytest.mark.parametrize("cache", ["", ".ca", ".cg", ".cs", ".cv"])
 def test_load_cache_modifier(cache, device):

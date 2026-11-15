@@ -529,7 +529,8 @@ def MaskedLoadOp : TT_AMDGPU_Op<"masked_load", []> {
     LLVM_Type:$falseVal,
     Optional<I16>:$multicastMask,
     DefaultValuedAttr<TT_CacheModifierAttr, "::mlir::triton::CacheModifier::NONE">:$cache,
-    DefaultValuedAttr<BoolAttr, "false">:$forceNoAlias
+    DefaultValuedAttr<BoolAttr, "false">:$forceNoAlias,
+    DefaultValuedAttr<BoolAttr, "false">:$isVolatile
   );
 
   let results = (outs LLVM_Type:$result);

@@ -39,6 +39,8 @@ public:
     std::tie(volatileFlag, nonTmpFlag) =
         mlir::LLVM::AMD::getCacheModifierFlagsForLoadStore(
             cacheMod, mlir::LLVM::AMD::MemoryOp::Load);
+    // `tt.load {isVolatile}` must not be hoisted/CSE'd (e.g. spin-wait loops).
+    volatileFlag |= loadOp.getIsVolatile();
 
     auto createLoadWithAttrs = [&](Location loadLoc) -> Value {
       int vecBits = 0;

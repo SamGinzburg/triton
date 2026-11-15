@@ -608,7 +608,9 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
             otherElems, vecStart);
 
       Value loadVal = llLoad(rewriter, loc, ptr, vecTy, pred, falseVal,
-                             multicastMask, cacheMod);
+                             multicastMask, cacheMod,
+                             /*forceNoAliasAsyncLoads=*/false,
+                             op.getIsVolatile());
       for (size_t ii = 0; ii < vec; ++ii) {
         Value vecIdx = createIndexAttrConstant(
             rewriter, loc, getTypeConverter()->getIndexType(), ii);

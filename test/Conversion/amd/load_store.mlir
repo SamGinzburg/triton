@@ -56,3 +56,16 @@ module attributes {"ttg.num-warps" = 1 : i32, "ttg.threads-per-warp" = 64 : i32}
     tt.return
   }
 }
+
+// -----
+
+#blocked_vol = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
+module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32} {
+  // CHECK-LABEL: global_load_volatile
+  tt.func @global_load_volatile(%arg0: !tt.ptr<i32> {tt.divisibility = 16 : i32}) {
+    %0 = tt.splat %arg0 : !tt.ptr<i32> -> tensor<32x!tt.ptr<i32>, #blocked_vol>
+    // CHECK: llvm.load volatile {{.*}} : !llvm.ptr<1> -> vector<1xi32>
+    %1 = tt.load %0 {isVolatile = true} : tensor<32x!tt.ptr<i32>, #blocked_vol>
+    tt.return
+  }
+}
