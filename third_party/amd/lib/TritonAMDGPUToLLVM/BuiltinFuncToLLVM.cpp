@@ -202,8 +202,14 @@ struct ConvertBuiltinFuncToLLVM
     MLIRContext *context = &getContext();
     ModuleOp mod = getOperation();
 
+    // No block merging here: MLIR merges identical blocks without regard to
+    // convergent ops, e.g. the pre-loop and in-loop copies of a scalar
+    // atomic's `if (tid == 0) {atomic; st.shared}; s_barrier; ld.shared`.
+    // That makes a polling loop irreducible with lane-divergent entries, and
+    // the structurized wave then spins forever. LLVM's convergence-aware
+    // SimplifyCFG still merges blocks where legal.
     GreedyRewriteConfig config;
-    config.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Aggressive);
+    config.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Normal);
 
     AMD::TargetInfo targetInfo(this->gfxArch.getValue());
     RewritePatternSet patterns(context);

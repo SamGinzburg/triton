@@ -5252,6 +5252,28 @@ def test_volatile_load_spin_loop_amd(device):
     assert len(volatile_loads) >= 2, volatile_loads
 
 
+@pytest.mark.skipif(not is_hip(), reason="scalar atomic block merging is AMD specific")
+def test_atomic_cas_spin_loop_amd(device):
+
+    @triton.jit
+    def _kernel(ctr_ptr, num_programs, iters):
+        for i in range(iters):
+            tl.atomic_add(ctr_ptr, 1, sem="release", scope="gpu")
+            target = (i + 1) * num_programs
+            v = tl.atomic_cas(ctr_ptr, -1, -1, sem="acquire", scope="gpu")
+            while v < target:
+                v = tl.atomic_cas(ctr_ptr, -1, -1, sem="acquire", scope="gpu")
+
+    grid, iters = 4, 3
+    ctr = torch.zeros(1, dtype=torch.int32, device=device)
+    # Merging the identical pre-loop and in-loop scalar CAS blocks makes the loop irreducible
+    # with lane-divergent entries and the kernel hangs, so check the IR before launching.
+    compiled = _kernel.warmup(ctr, grid, iters, num_warps=4, grid=(grid, ))
+    assert compiled.asm["llir"].count("cmpxchg ") >= 2
+    _kernel[(grid, )](ctr, grid, iters, num_warps=4)
+    assert ctr.item() == grid * iters
+
+
 @pytest.mark.interpreter
 @pytest.mark.parametrize("cache", ["", ".ca", ".cg", ".cs", ".cv"])
 def test_load_cache_modifier(cache, device):

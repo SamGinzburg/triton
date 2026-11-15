@@ -24,3 +24,24 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 1 : i32, ttg.targ
     tt.return %0 : tensor<64xf32, #blocked>
   }
 }
+
+// Identical blocks must not be merged: for scalar atomics in a polling loop
+// this creates an irreducible loop with lane-divergent entries.
+// RUN: triton-opt %s --convert-builtin-func-to-llvm | FileCheck %s --check-prefix=NO_MERGE
+module {
+  // NO_MERGE-LABEL: llvm.func @no_block_merging
+  llvm.func @no_block_merging(%ptr: !llvm.ptr<1>, %pred: i1, %cmp: i32, %val: i32) {
+    llvm.cond_br %pred, ^bb1, ^bb2
+  ^bb1:
+    // NO_MERGE-COUNT-2: llvm.cmpxchg
+    %0 = llvm.cmpxchg %ptr, %cmp, %val syncscope("agent") acquire monotonic : !llvm.ptr<1>, i32
+    rocdl.s.barrier
+    llvm.br ^bb3
+  ^bb2:
+    %1 = llvm.cmpxchg %ptr, %cmp, %val syncscope("agent") acquire monotonic : !llvm.ptr<1>, i32
+    rocdl.s.barrier
+    llvm.br ^bb3
+  ^bb3:
+    llvm.return
+  }
+}
